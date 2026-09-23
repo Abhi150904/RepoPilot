@@ -4,9 +4,37 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.analyzer import IssueAnalyzer
 from app.agents.planner import Planner
+from app.agents.repo_explorer import RepoExplorer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.issue import IssueAnalysis
+from app.schemas.repository import RepositoryContext
+from app.tools.github import GitHubClient
+
+
+def start_route(state: AgentState) -> str:
+    if "repository" in state and "issue_number" in state:
+        return "fetch_github_issue"
+    return "issue_analyzer"
+
+
+def after_analyzer_route(state: AgentState) -> str:
+    if "repository" in state:
+        return "repo_explorer"
+    return "planner"
+
+
+def fetch_github_issue_node(state: AgentState) -> AgentState:
+    repository = state["repository"]
+    issue_number = state["issue_number"]
+    issue = GitHubClient().get_issue(repository, issue_number)
+    issue_text = f"{issue.title}\n\n{issue.body}".strip()
+    return {
+        "issue": issue_text,
+        "issue_title": issue.title,
+        "issue_body": issue.body,
+        "issue_url": issue.url,
+    }
 
 
 def issue_analyzer_node(state: AgentState) -> AgentState:
@@ -19,19 +47,56 @@ def issue_analyzer_node(state: AgentState) -> AgentState:
 def planner_node(state: AgentState) -> AgentState:
     issue = state["issue"]
     analysis = IssueAnalysis.model_validate(state["analysis"])
+    repository_context = None
+    if "repository_context" in state:
+        repository_context = RepositoryContext.model_validate(state["repository_context"])
     planner = Planner(llm=get_llm("planner"))
-    plan = planner.create_plan(issue=issue, analysis=analysis)
+    plan = planner.create_plan(
+        issue=issue,
+        analysis=analysis,
+        repository_context=repository_context,
+    )
     return {"plan": plan.model_dump()}
+
+
+def repo_explorer_node(state: AgentState) -> AgentState:
+    repository = state["repository"]
+    issue = state["issue"]
+    analysis = IssueAnalysis.model_validate(state["analysis"])
+    explorer = RepoExplorer(github=GitHubClient())
+    context = explorer.explore(
+        repository=repository,
+        issue=issue,
+        analysis=analysis,
+    )
+    return {"repository_context": context.model_dump()}
 
 
 def build_workflow():
     graph = StateGraph(AgentState)
+    graph.add_node("fetch_github_issue", fetch_github_issue_node)
     graph.add_node("issue_analyzer", issue_analyzer_node)
+    graph.add_node("repo_explorer", repo_explorer_node)
     graph.add_node("planner", planner_node)
 
-    graph.add_edge(START, "issue_analyzer")
-    graph.add_edge("issue_analyzer", "planner")
+    graph.add_conditional_edges(
+        START,
+        start_route,
+        {
+            "fetch_github_issue": "fetch_github_issue",
+            "issue_analyzer": "issue_analyzer",
+        },
+    )
+    graph.add_edge("fetch_github_issue", "issue_analyzer")
+    graph.add_conditional_edges(
+        "issue_analyzer",
+        after_analyzer_route,
+        {
+            "repo_explorer": "repo_explorer",
+            "planner": "planner",
+        },
+    )
+    graph.add_edge("repo_explorer", "planner")
     graph.add_edge("planner", END)
 
     return graph.compile()
-

@@ -13,3 +13,10 @@ class IssueAnalysis(BaseModel):
         description="Expected implementation risk."
     )
 
+
+class GitHubIssue(BaseModel):
+    number: int
+    title: str
+    body: str
+    url: str
+    is_pull_request: bool = False
