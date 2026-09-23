@@ -51,8 +51,12 @@ class MockLLMProvider(LLMProvider):
             "request validation schema",
             "login endpoint tests",
         ]
-        if repository_context and repository_context.matched_files:
-            files_to_inspect = [file.path for file in repository_context.matched_files]
+        if repository_context:
+            files_to_inspect = (
+                [file.path for file in repository_context.matched_files]
+                if repository_context.matched_files
+                else ["No repository files matched; broaden repository search before editing."]
+            )
 
         return ImplementationPlan(
             summary=f"Investigate and fix the reported behavior in {analysis.suspected_area}.",
