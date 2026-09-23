@@ -4,7 +4,12 @@ from typing import TypedDict
 
 
 class AgentState(TypedDict, total=False):
+    repository: str
+    issue_number: int
     issue: str
+    issue_title: str
+    issue_body: str
+    issue_url: str
     analysis: dict[str, object]
+    repository_context: dict[str, object]
     plan: dict[str, object]
-
