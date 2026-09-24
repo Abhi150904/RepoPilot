@@ -3,8 +3,16 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
+from app.retrieval.chunker import chunk_code_file
+from app.retrieval.keyword import retrieve_keyword_chunks
 from app.schemas.issue import IssueAnalysis
-from app.schemas.repository import RepositoryContext, RepositoryFile, RetrievedFile
+from app.schemas.repository import (
+    CodeChunk,
+    RepositoryContext,
+    RepositoryFile,
+    RetrievalResult,
+    RetrievedFile,
+)
 from app.tools.github import GitHubClient, GitHubError
 
 
@@ -87,11 +95,14 @@ class RepoExplorer:
         candidate_paths = _rank_file_paths(files=files, terms=query_terms)
         candidate_paths.extend(self._search_code_paths(repository, query_terms))
 
-        selected_paths = _dedupe(candidate_paths)[:max_files]
-        matched_files = [
-            self._read_preview(repository=repository, path=path, terms=query_terms)
-            for path in selected_paths
-        ]
+        selected_paths = _dedupe(candidate_paths)[: max_files * 3]
+        chunks = self._read_candidate_chunks(repository=repository, paths=selected_paths)
+        retrieval_results = retrieve_keyword_chunks(
+            chunks=chunks,
+            query_terms=query_terms,
+            limit=max_files * 2,
+        )
+        matched_files = _results_to_retrieved_files(retrieval_results, max_files=max_files)
 
         return RepositoryContext(
             repository=repository,
@@ -112,22 +123,19 @@ class RepoExplorer:
                 continue
         return _dedupe(paths)
 
-    def _read_preview(
+    def _read_candidate_chunks(
         self,
         repository: str,
-        path: str,
-        terms: list[str],
-    ) -> RetrievedFile | None:
-        try:
-            content = self._github.read_file(repository, path)
-        except GitHubError:
-            return None
-
-        return RetrievedFile(
-            path=path,
-            reason=_reason_for_path(path=path, terms=terms),
-            content_preview=content[:1200],
-        )
+        paths: list[str],
+    ) -> list[CodeChunk]:
+        chunks: list[CodeChunk] = []
+        for path in paths:
+            try:
+                content = self._github.read_file(repository, path)
+            except GitHubError:
+                continue
+            chunks.extend(chunk_code_file(path=path, content=content))
+        return chunks
 
 
 def _build_query_terms(issue: str, analysis: IssueAnalysis) -> list[str]:
@@ -195,6 +203,37 @@ def _reason_for_path(path: str, terms: list[str]) -> str:
     if matching_terms:
         return f"Path matched issue terms: {', '.join(matching_terms[:4])}."
     return "Selected by repository code search."
+
+
+def _results_to_retrieved_files(
+    results: list[RetrievalResult],
+    max_files: int,
+) -> list[RetrievedFile]:
+    retrieved_files: list[RetrievedFile] = []
+    seen_paths: set[str] = set()
+
+    for result in results:
+        path = result.chunk.path
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        retrieved_files.append(
+            RetrievedFile(
+                path=path,
+                reason=(
+                    "Keyword retrieval matched terms: "
+                    f"{', '.join(result.matched_terms[:5])} "
+                    f"(lines {result.chunk.start_line}-{result.chunk.end_line})."
+                ),
+                content_preview=result.chunk.content[:1200],
+                score=result.score,
+                source=result.source,
+            )
+        )
+        if len(retrieved_files) >= max_files:
+            break
+
+    return retrieved_files
 
 
 def _dedupe(items: list[str]) -> list[str]:

@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 1**: a small LangGraph workflow that can either run a local demo issue or fetch a real GitHub issue and gather basic repository context.
+This repository currently implements **Version 2.1**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, and use keyword retrieval as the first retrieval baseline.
 
 ## Version 0 Workflow
 
@@ -14,6 +14,16 @@ START -> issue_analyzer -> planner -> END
 
 ```text
 START -> fetch_github_issue -> issue_analyzer -> repo_explorer -> planner -> END
+```
+
+## Version 2.1 Retrieval
+
+```text
+GitHub repository files
+  -> candidate file ranking
+  -> code-aware-ish chunking
+  -> keyword chunk scoring
+  -> repository context for planning
 ```
 
 The CLI uses a hard-coded issue:
@@ -42,6 +52,9 @@ backend/
     graph/
       state.py
       workflow.py
+    retrieval/
+      chunker.py
+      keyword.py
     schemas/
       issue.py
       plan.py
@@ -91,7 +104,8 @@ pytest
 - **Mock provider by default** makes Version 0 runnable without accounts, API keys, network calls, or hidden infrastructure.
 - **GitHub tools are deterministic functions** rather than extra agents, keeping reasoning separate from API access.
 - **Basic repository exploration comes before RAG**, so the project can prove the simple path before adding embeddings or vector infrastructure.
+- **Keyword retrieval is the Version 2.1 baseline** so later vector, BM25, hybrid, fusion, and reranking work can be compared against a deterministic starting point.
 
 ## Not Implemented Yet
 
-This version intentionally does not include RAG, embeddings, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
+This version intentionally does not include embeddings, Qdrant, BM25, hybrid retrieval, reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
