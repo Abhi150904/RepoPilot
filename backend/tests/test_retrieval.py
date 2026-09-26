@@ -5,10 +5,11 @@ import pytest
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.chunker import chunk_code_file
 from app.retrieval.embeddings import HashEmbeddingProvider, tokenize_for_embedding
-from app.retrieval.hybrid import HybridRetriever, HybridRetrievalWeights
+from app.retrieval.fusion import reciprocal_rank_fusion
+from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.keyword import retrieve_keyword_chunks
 from app.retrieval.vector import InMemoryVectorIndex
-from app.schemas.repository import CodeChunk
+from app.schemas.repository import CodeChunk, RetrievalResult
 
 
 def test_chunk_code_file_splits_on_common_symbols() -> None:
@@ -173,6 +174,61 @@ def test_bm25_empty_index_and_invalid_parameters() -> None:
         BM25Index(b=1.5)
 
 
+def test_reciprocal_rank_fusion_promotes_results_seen_by_multiple_retrievers() -> None:
+    shared = CodeChunk(
+        path="src/agents/planner.agent.ts",
+        start_line=8,
+        end_line=27,
+        content="destination",
+        symbol="extractDestination",
+    )
+    keyword_only = CodeChunk(
+        path="src/api/schemas.ts",
+        start_line=1,
+        end_line=6,
+        content="schema",
+        symbol="startRunRequestSchema",
+    )
+    vector_only = CodeChunk(
+        path="src/guardrails/input.guardrail.ts",
+        start_line=10,
+        end_line=20,
+        content="input",
+        symbol=None,
+    )
+
+    results = reciprocal_rank_fusion(
+        ranked_lists=[
+            [
+                RetrievalResult(chunk=keyword_only, score=10, matched_terms=["schema"], source="keyword"),
+                RetrievalResult(chunk=shared, score=8, matched_terms=["destination"], source="keyword"),
+            ],
+            [
+                RetrievalResult(chunk=vector_only, score=0.9, matched_terms=["input"], source="vector"),
+                RetrievalResult(chunk=shared, score=0.8, matched_terms=["destination"], source="vector"),
+            ],
+            [
+                RetrievalResult(chunk=shared, score=2, matched_terms=["validation"], source="bm25"),
+            ],
+        ],
+        k=60,
+        limit=3,
+    )
+
+    assert results[0].chunk.path == "src/agents/planner.agent.ts"
+    assert results[0].source == "rrf"
+    assert results[0].matched_terms == ["destination", "validation"]
+
+
+def test_reciprocal_rank_fusion_handles_empty_inputs_and_invalid_k() -> None:
+    assert reciprocal_rank_fusion(ranked_lists=[], limit=5) == []
+    assert reciprocal_rank_fusion(ranked_lists=[[]], limit=5) == []
+    assert reciprocal_rank_fusion(ranked_lists=[[]], limit=0) == []
+
+    with pytest.raises(ValueError, match="RRF k"):
+        reciprocal_rank_fusion(ranked_lists=[], k=0)
+
+
 def test_hybrid_retrieval_merges_duplicate_chunks_from_multiple_retrievers() -> None:
     chunks = [
         CodeChunk(
@@ -199,7 +255,7 @@ def test_hybrid_retrieval_merges_duplicate_chunks_from_multiple_retrievers() -> 
     ]
     retriever = HybridRetriever(
         embedding_provider=HashEmbeddingProvider(dimensions=64),
-        weights=HybridRetrievalWeights(keyword=0.4, bm25=0.4, vector=0.2),
+        rrf_k=60,
     )
 
     results = retriever.search(
@@ -209,7 +265,7 @@ def test_hybrid_retrieval_merges_duplicate_chunks_from_multiple_retrievers() -> 
     )
 
     assert results[0].chunk.path == "src/agents/planner.agent.ts"
-    assert results[0].source == "hybrid"
+    assert results[0].source == "hybrid_rrf"
     assert "destination" in results[0].matched_terms
     assert len([result for result in results if result.chunk.path == "src/agents/planner.agent.ts"]) == 1
     assert all(result.chunk.path != "web/app/globals.css" for result in results)
@@ -231,8 +287,5 @@ def test_hybrid_retrieval_handles_empty_inputs_and_invalid_weights() -> None:
         query_terms=[],
     ) == []
 
-    with pytest.raises(ValueError, match="negative"):
-        HybridRetriever(weights=HybridRetrievalWeights(keyword=-1))
-
-    with pytest.raises(ValueError, match="positive"):
-        HybridRetriever(weights=HybridRetrievalWeights(keyword=0, bm25=0, vector=0))
+    with pytest.raises(ValueError, match="RRF k"):
+        HybridRetriever(rrf_k=0)

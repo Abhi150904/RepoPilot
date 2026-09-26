@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 2.4**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, and use hybrid retrieval across keyword, vector, and BM25 signals.
+This repository currently implements **Version 2.5**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, and use hybrid retrieval with reciprocal rank fusion across keyword, vector, and BM25 signals.
 
 ## Version 0 Workflow
 
@@ -59,7 +59,19 @@ code chunks
   -> ranked hybrid chunks
 ```
 
-Repo exploration now uses the hybrid retriever. Keyword and BM25 have higher default weights than vector retrieval because the current vector provider is deterministic and local rather than model-backed.
+Repo exploration now uses the hybrid retriever.
+
+## Version 2.5 Reciprocal Rank Fusion
+
+```text
+keyword ranked chunks
+BM25 ranked chunks
+vector ranked chunks
+  -> reciprocal rank fusion
+  -> ranked hybrid chunks
+```
+
+RRF combines retrievers by rank instead of raw score, which is more stable because keyword, BM25, and vector scores have different meanings.
 
 The CLI uses a hard-coded issue:
 
@@ -91,6 +103,7 @@ backend/
       bm25.py
       chunker.py
       embeddings.py
+      fusion.py
       hybrid.py
       keyword.py
       vector.py
@@ -146,8 +159,8 @@ pytest
 - **Keyword retrieval is the Version 2.1 baseline** so later vector, BM25, hybrid, fusion, and reranking work can be compared against a deterministic starting point.
 - **Vector retrieval starts in memory** so the architecture is visible before adding Qdrant or provider-specific embedding APIs.
 - **BM25 adds a stronger sparse baseline** before combining retrievers in the hybrid retrieval phase.
-- **Hybrid retrieval combines retriever scores** with configurable weights before the later reciprocal-rank-fusion phase.
+- **Hybrid retrieval uses reciprocal rank fusion** so chunks found by multiple retrievers rise without comparing incompatible raw scores.
 
 ## Not Implemented Yet
 
-This version intentionally does not include Qdrant, reciprocal rank fusion, reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
+This version intentionally does not include Qdrant, reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.

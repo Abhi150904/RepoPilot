@@ -221,7 +221,7 @@ def _results_to_retrieved_files(
             RetrievedFile(
                 path=path,
                 reason=(
-                    f"{result.source.title()} retrieval matched terms: "
+                    f"{_format_source(result.source)} retrieval matched terms: "
                     f"{', '.join(result.matched_terms[:5])} "
                     f"(lines {result.chunk.start_line}-{result.chunk.end_line})."
                 ),
@@ -234,6 +234,12 @@ def _results_to_retrieved_files(
             break
 
     return retrieved_files
+
+
+def _format_source(source: str) -> str:
+    if source == "hybrid_rrf":
+        return "Hybrid RRF"
+    return source.replace("_", " ").title()
 
 
 def _dedupe(items: list[str]) -> list[str]:
