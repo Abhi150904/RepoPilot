@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from app.retrieval.chunker import chunk_code_file
+from app.retrieval.embeddings import HashEmbeddingProvider, tokenize_for_embedding
 from app.retrieval.keyword import retrieve_keyword_chunks
+from app.retrieval.vector import InMemoryVectorIndex
 from app.schemas.repository import CodeChunk
 
 
@@ -66,3 +68,52 @@ def test_keyword_retrieval_scores_path_symbol_and_content_matches() -> None:
     assert "schema" in results[0].matched_terms
     assert "message" in results[0].matched_terms
     assert all(result.score > 0 for result in results)
+
+
+def test_hash_embedding_provider_is_deterministic_and_normalizes_tokens() -> None:
+    provider = HashEmbeddingProvider(dimensions=32)
+
+    first = provider.embed_texts(["extractDestination validates destinations"])[0]
+    second = provider.embed_texts(["extractDestination validates destinations"])[0]
+
+    assert first == second
+    assert tokenize_for_embedding("extractDestination validates destinations") == [
+        "extract",
+        "destination",
+        "validate",
+    ]
+
+
+def test_vector_retrieval_ranks_related_chunks_above_unrelated_chunks() -> None:
+    chunks = [
+        CodeChunk(
+            path="src/agents/planner.agent.ts",
+            start_line=8,
+            end_line=27,
+            content="const extractDestination = (userQuery: string) => destination;",
+            symbol="extractDestination",
+        ),
+        CodeChunk(
+            path="src/api/schemas.ts",
+            start_line=1,
+            end_line=6,
+            content="message: z.string().trim().min(1, 'message is required')",
+            symbol="startRunRequestSchema",
+        ),
+        CodeChunk(
+            path="web/app/globals.css",
+            start_line=1,
+            end_line=10,
+            content=":root { --bg: #090a0c; --panel: #101216; }",
+            symbol=None,
+        ),
+    ]
+    index = InMemoryVectorIndex(embedding_provider=HashEmbeddingProvider(dimensions=64))
+    index.add_chunks(chunks)
+
+    results = index.search("destination validation", limit=3)
+
+    assert results[0].chunk.path == "src/agents/planner.agent.ts"
+    assert results[0].source == "vector"
+    assert "destination" in results[0].matched_terms
+    assert all(result.chunk.path != "web/app/globals.css" for result in results)
