@@ -8,6 +8,7 @@ from app.retrieval.embeddings import HashEmbeddingProvider, tokenize_for_embeddi
 from app.retrieval.fusion import reciprocal_rank_fusion
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.keyword import retrieve_keyword_chunks
+from app.retrieval.reranker import HeuristicReranker, NoOpReranker
 from app.retrieval.vector import InMemoryVectorIndex
 from app.schemas.repository import CodeChunk, RetrievalResult
 
@@ -289,3 +290,124 @@ def test_hybrid_retrieval_handles_empty_inputs_and_invalid_weights() -> None:
 
     with pytest.raises(ValueError, match="RRF k"):
         HybridRetriever(rrf_k=0)
+
+
+def test_noop_reranker_preserves_order_and_limit() -> None:
+    results = [
+        RetrievalResult(
+            chunk=CodeChunk(path="a.ts", start_line=1, end_line=1, content="a"),
+            score=0.2,
+            matched_terms=["a"],
+            source="hybrid_rrf",
+        ),
+        RetrievalResult(
+            chunk=CodeChunk(path="b.ts", start_line=1, end_line=1, content="b"),
+            score=0.1,
+            matched_terms=["b"],
+            source="hybrid_rrf",
+        ),
+    ]
+
+    reranked = NoOpReranker().rerank(query="anything", results=results, limit=1)
+
+    assert reranked == [results[0]]
+
+
+def test_heuristic_reranker_promotes_exact_symbol_and_early_content_matches() -> None:
+    less_exact = RetrievalResult(
+        chunk=CodeChunk(
+            path="src/agents/researcher.agent.ts",
+            start_line=30,
+            end_line=50,
+            content="const fallbackResearch = () => 'destination guidance';",
+            symbol="fallbackResearch",
+        ),
+        score=0.5,
+        matched_terms=["destination"],
+        source="hybrid_rrf",
+    )
+    more_exact = RetrievalResult(
+        chunk=CodeChunk(
+            path="src/agents/planner.agent.ts",
+            start_line=8,
+            end_line=27,
+            content="const extractDestination = () => destination;",
+            symbol="extractDestination",
+        ),
+        score=0.45,
+        matched_terms=["destination"],
+        source="hybrid_rrf",
+    )
+
+    reranked = HeuristicReranker().rerank(
+        query="destination validation",
+        results=[less_exact, more_exact],
+        limit=2,
+    )
+
+    assert reranked[0].chunk.path == "src/agents/planner.agent.ts"
+    assert reranked[0].source == "reranked"
+
+
+def test_heuristic_reranker_penalizes_test_files_unless_query_mentions_tests() -> None:
+    implementation = RetrievalResult(
+        chunk=CodeChunk(
+            path="src/agents/planner.agent.ts",
+            start_line=8,
+            end_line=27,
+            content="const extractDestination = () => destination;",
+            symbol="extractDestination",
+        ),
+        score=0.5,
+        matched_terms=["destination"],
+        source="hybrid_rrf",
+    )
+    test_file = RetrievalResult(
+        chunk=CodeChunk(
+            path="src/agents/planner.agent.test.ts",
+            start_line=58,
+            end_line=68,
+            content="it('uses destination', () => {})",
+            symbol=None,
+        ),
+        score=0.5,
+        matched_terms=["destination"],
+        source="hybrid_rrf",
+    )
+
+    reranked = HeuristicReranker().rerank(
+        query="destination validation",
+        results=[test_file, implementation],
+        limit=2,
+    )
+    test_query_reranked = HeuristicReranker().rerank(
+        query="destination test",
+        results=[test_file, implementation],
+        limit=2,
+    )
+
+    assert reranked[0].chunk.path == "src/agents/planner.agent.ts"
+    assert test_query_reranked[0].score >= test_query_reranked[1].score
+
+
+def test_heuristic_reranker_handles_empty_results_and_limit() -> None:
+    reranker = HeuristicReranker()
+
+    assert reranker.rerank(query="destination", results=[], limit=5) == []
+    assert reranker.rerank(
+        query="destination",
+        results=[
+            RetrievalResult(
+                chunk=CodeChunk(
+                    path="src/example.ts",
+                    start_line=1,
+                    end_line=1,
+                    content="destination",
+                ),
+                score=0.1,
+                matched_terms=["destination"],
+                source="hybrid_rrf",
+            )
+        ],
+        limit=0,
+    ) == []

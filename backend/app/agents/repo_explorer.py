@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 
 from app.retrieval.chunker import chunk_code_file
 from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.reranker import HeuristicReranker
 from app.schemas.issue import IssueAnalysis
 from app.schemas.repository import (
     CodeChunk,
@@ -100,6 +101,11 @@ class RepoExplorer:
         retrieval_results = HybridRetriever().search(
             chunks=chunks,
             query_terms=query_terms,
+            limit=max_files * 2,
+        )
+        retrieval_results = HeuristicReranker().rerank(
+            query=query,
+            results=retrieval_results,
             limit=max_files * 2,
         )
         matched_files = _results_to_retrieved_files(retrieval_results, max_files=max_files)
