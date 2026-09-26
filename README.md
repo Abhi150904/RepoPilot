@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 2.2**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, use keyword retrieval as the first baseline, and expose an in-memory vector retrieval component for the next hybrid step.
+This repository currently implements **Version 2.3**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, use keyword retrieval as the first baseline, and expose in-memory vector and BM25 retrieval components for the next hybrid step.
 
 ## Version 0 Workflow
 
@@ -37,6 +37,17 @@ code chunks
 
 The vector retriever is intentionally local and deterministic for now. A real embedding provider and external vector database can be added after the baseline behavior is testable.
 
+## Version 2.3 BM25 Retrieval
+
+```text
+code chunks
+  -> tokenized sparse index
+  -> BM25 scoring
+  -> ranked chunks
+```
+
+BM25 gives the project a stronger lexical baseline than simple keyword scoring by accounting for term rarity, term frequency, and chunk length.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -64,6 +75,7 @@ backend/
       state.py
       workflow.py
     retrieval/
+      bm25.py
       chunker.py
       embeddings.py
       keyword.py
@@ -119,7 +131,8 @@ pytest
 - **Basic repository exploration comes before RAG**, so the project can prove the simple path before adding embeddings or vector infrastructure.
 - **Keyword retrieval is the Version 2.1 baseline** so later vector, BM25, hybrid, fusion, and reranking work can be compared against a deterministic starting point.
 - **Vector retrieval starts in memory** so the architecture is visible before adding Qdrant or provider-specific embedding APIs.
+- **BM25 adds a stronger sparse baseline** before combining retrievers in the hybrid retrieval phase.
 
 ## Not Implemented Yet
 
-This version intentionally does not include Qdrant, BM25, hybrid retrieval, reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
+This version intentionally does not include Qdrant, hybrid retrieval, reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
