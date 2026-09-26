@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 1**: a small LangGraph workflow that can either run a local demo issue or fetch a real GitHub issue and gather basic repository context.
+This repository currently implements **Version 2.6**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, use hybrid retrieval with reciprocal rank fusion, and rerank the final candidates with a deterministic heuristic reranker.
 
 ## Version 0 Workflow
 
@@ -15,6 +15,73 @@ START -> issue_analyzer -> planner -> END
 ```text
 START -> fetch_github_issue -> issue_analyzer -> repo_explorer -> planner -> END
 ```
+
+## Version 2.1 Retrieval
+
+```text
+GitHub repository files
+  -> candidate file ranking
+  -> code-aware-ish chunking
+  -> keyword chunk scoring
+  -> repository context for planning
+```
+
+## Version 2.2 Vector Retrieval
+
+```text
+code chunks
+  -> deterministic local embeddings
+  -> in-memory cosine search
+  -> vector-ranked chunks
+```
+
+The vector retriever is intentionally local and deterministic for now. A real embedding provider and external vector database can be added after the baseline behavior is testable.
+
+## Version 2.3 BM25 Retrieval
+
+```text
+code chunks
+  -> tokenized sparse index
+  -> BM25 scoring
+  -> ranked chunks
+```
+
+BM25 gives the project a stronger lexical baseline than simple keyword scoring by accounting for term rarity, term frequency, and chunk length.
+
+## Version 2.4 Hybrid Retrieval
+
+```text
+code chunks
+  -> keyword retrieval
+  -> vector retrieval
+  -> BM25 retrieval
+  -> normalized weighted merge
+  -> ranked hybrid chunks
+```
+
+Repo exploration now uses the hybrid retriever.
+
+## Version 2.5 Reciprocal Rank Fusion
+
+```text
+keyword ranked chunks
+BM25 ranked chunks
+vector ranked chunks
+  -> reciprocal rank fusion
+  -> ranked hybrid chunks
+```
+
+RRF combines retrievers by rank instead of raw score, which is more stable because keyword, BM25, and vector scores have different meanings.
+
+## Version 2.6 Reranker Interface
+
+```text
+hybrid RRF chunks
+  -> reranker
+  -> final ranked chunks
+```
+
+The reranker layer is model-provider agnostic. This version includes a no-op reranker and a deterministic heuristic reranker that boosts exact path, symbol, and early-content matches while slightly downranking test files unless the query asks for tests.
 
 The CLI uses a hard-coded issue:
 
@@ -42,6 +109,15 @@ backend/
     graph/
       state.py
       workflow.py
+    retrieval/
+      bm25.py
+      chunker.py
+      embeddings.py
+      fusion.py
+      hybrid.py
+      keyword.py
+      reranker.py
+      vector.py
     schemas/
       issue.py
       plan.py
@@ -91,7 +167,12 @@ pytest
 - **Mock provider by default** makes Version 0 runnable without accounts, API keys, network calls, or hidden infrastructure.
 - **GitHub tools are deterministic functions** rather than extra agents, keeping reasoning separate from API access.
 - **Basic repository exploration comes before RAG**, so the project can prove the simple path before adding embeddings or vector infrastructure.
+- **Keyword retrieval is the Version 2.1 baseline** so later vector, BM25, hybrid, fusion, and reranking work can be compared against a deterministic starting point.
+- **Vector retrieval starts in memory** so the architecture is visible before adding Qdrant or provider-specific embedding APIs.
+- **BM25 adds a stronger sparse baseline** before combining retrievers in the hybrid retrieval phase.
+- **Hybrid retrieval uses reciprocal rank fusion** so chunks found by multiple retrievers rise without comparing incompatible raw scores.
+- **Reranking is explicit and replaceable** so a model-backed reranker can be added later without changing graph orchestration.
 
 ## Not Implemented Yet
 
-This version intentionally does not include RAG, embeddings, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
+This version intentionally does not include Qdrant, model-backed reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
