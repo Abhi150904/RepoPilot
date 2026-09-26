@@ -58,6 +58,8 @@ def test_github_issue_workflow_fetches_issue_and_repository_context(monkeypatch)
     assert result["repository_context"]["repository"] == "example/demo"
     assert result["repository_context"]["matched_files"]
     assert "src/routes/login.py" in result["plan"]["files_to_inspect"]
+    assert result["code_changes"]["changes"]
+    assert result["diff"]
 
 
 def test_github_issue_workflow_rejects_pull_request_numbers(monkeypatch) -> None:

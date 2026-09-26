@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 2.6**: a small LangGraph workflow that can fetch a real GitHub issue, explore repository files, chunk candidate code, use hybrid retrieval with reciprocal rank fusion, and rerank the final candidates with a deterministic heuristic reranker.
+This repository currently implements **Version 3.0**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, and produce a controlled code-change proposal with a diff.
 
 ## Version 0 Workflow
 
@@ -83,6 +83,20 @@ hybrid RRF chunks
 
 The reranker layer is model-provider agnostic. This version includes a no-op reranker and a deterministic heuristic reranker that boosts exact path, symbol, and early-content matches while slightly downranking test files unless the query asks for tests.
 
+## Version 3 Code Writer
+
+```text
+GitHub issue
+  -> analysis
+  -> retrieval
+  -> implementation plan
+  -> code writer
+  -> structured change proposal
+  -> unified diff
+```
+
+The current code writer is intentionally controlled. It proposes patch placeholders for retrieved target files and renders a diff, but it does not yet apply arbitrary generated edits to the repository.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -101,6 +115,7 @@ backend/
   app/
     agents/
       analyzer.py
+      coder.py
       planner.py
       repo_explorer.py
     core/
@@ -119,6 +134,7 @@ backend/
       reranker.py
       vector.py
     schemas/
+      code_change.py
       issue.py
       plan.py
       repository.py
@@ -172,7 +188,8 @@ pytest
 - **BM25 adds a stronger sparse baseline** before combining retrievers in the hybrid retrieval phase.
 - **Hybrid retrieval uses reciprocal rank fusion** so chunks found by multiple retrievers rise without comparing incompatible raw scores.
 - **Reranking is explicit and replaceable** so a model-backed reranker can be added later without changing graph orchestration.
+- **Code writing is controlled in Version 3** so the system can expose structured proposed changes and diffs before executing tests or mutating real repositories.
 
 ## Not Implemented Yet
 
-This version intentionally does not include Qdrant, model-backed reranking, Docker sandboxing, code editing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
+This version intentionally does not include Qdrant, model-backed reranking, Docker sandboxing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
