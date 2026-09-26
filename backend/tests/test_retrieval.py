@@ -5,6 +5,7 @@ import pytest
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.chunker import chunk_code_file
 from app.retrieval.embeddings import HashEmbeddingProvider, tokenize_for_embedding
+from app.retrieval.hybrid import HybridRetriever, HybridRetrievalWeights
 from app.retrieval.keyword import retrieve_keyword_chunks
 from app.retrieval.vector import InMemoryVectorIndex
 from app.schemas.repository import CodeChunk
@@ -170,3 +171,68 @@ def test_bm25_empty_index_and_invalid_parameters() -> None:
 
     with pytest.raises(ValueError, match="b"):
         BM25Index(b=1.5)
+
+
+def test_hybrid_retrieval_merges_duplicate_chunks_from_multiple_retrievers() -> None:
+    chunks = [
+        CodeChunk(
+            path="src/agents/planner.agent.ts",
+            start_line=8,
+            end_line=27,
+            content="const extractDestination = (userQuery: string) => destination;",
+            symbol="extractDestination",
+        ),
+        CodeChunk(
+            path="src/api/schemas.ts",
+            start_line=1,
+            end_line=6,
+            content="message: z.string().trim().min(1, 'message is required')",
+            symbol="startRunRequestSchema",
+        ),
+        CodeChunk(
+            path="web/app/globals.css",
+            start_line=1,
+            end_line=10,
+            content="theme panel background color layout",
+            symbol=None,
+        ),
+    ]
+    retriever = HybridRetriever(
+        embedding_provider=HashEmbeddingProvider(dimensions=64),
+        weights=HybridRetrievalWeights(keyword=0.4, bm25=0.4, vector=0.2),
+    )
+
+    results = retriever.search(
+        chunks=chunks,
+        query_terms=["destination", "validation"],
+        limit=3,
+    )
+
+    assert results[0].chunk.path == "src/agents/planner.agent.ts"
+    assert results[0].source == "hybrid"
+    assert "destination" in results[0].matched_terms
+    assert len([result for result in results if result.chunk.path == "src/agents/planner.agent.ts"]) == 1
+    assert all(result.chunk.path != "web/app/globals.css" for result in results)
+
+
+def test_hybrid_retrieval_handles_empty_inputs_and_invalid_weights() -> None:
+    retriever = HybridRetriever()
+
+    assert retriever.search(chunks=[], query_terms=["destination"]) == []
+    assert retriever.search(
+        chunks=[
+            CodeChunk(
+                path="src/example.ts",
+                start_line=1,
+                end_line=1,
+                content="destination",
+            )
+        ],
+        query_terms=[],
+    ) == []
+
+    with pytest.raises(ValueError, match="negative"):
+        HybridRetriever(weights=HybridRetrievalWeights(keyword=-1))
+
+    with pytest.raises(ValueError, match="positive"):
+        HybridRetriever(weights=HybridRetrievalWeights(keyword=0, bm25=0, vector=0))

@@ -4,7 +4,7 @@ import re
 from pathlib import PurePosixPath
 
 from app.retrieval.chunker import chunk_code_file
-from app.retrieval.keyword import retrieve_keyword_chunks
+from app.retrieval.hybrid import HybridRetriever
 from app.schemas.issue import IssueAnalysis
 from app.schemas.repository import (
     CodeChunk,
@@ -97,7 +97,7 @@ class RepoExplorer:
 
         selected_paths = _dedupe(candidate_paths)[: max_files * 3]
         chunks = self._read_candidate_chunks(repository=repository, paths=selected_paths)
-        retrieval_results = retrieve_keyword_chunks(
+        retrieval_results = HybridRetriever().search(
             chunks=chunks,
             query_terms=query_terms,
             limit=max_files * 2,
@@ -221,7 +221,7 @@ def _results_to_retrieved_files(
             RetrievedFile(
                 path=path,
                 reason=(
-                    "Keyword retrieval matched terms: "
+                    f"{result.source.title()} retrieval matched terms: "
                     f"{', '.join(result.matched_terms[:5])} "
                     f"(lines {result.chunk.start_line}-{result.chunk.end_line})."
                 ),
