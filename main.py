@@ -60,6 +60,16 @@ def main() -> None:
     print("Implementation Plan:")
     print(json.dumps(result["plan"], indent=2))
 
+    if "code_changes" in result:
+        print()
+        print("Code Changes:")
+        print(json.dumps(result["code_changes"], indent=2))
+
+    if result.get("diff"):
+        print()
+        print("Diff:")
+        print(result["diff"])
+
 
 if __name__ == "__main__":
     main()

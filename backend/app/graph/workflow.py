@@ -3,11 +3,13 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.analyzer import IssueAnalyzer
+from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
 from app.agents.repo_explorer import RepoExplorer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.issue import IssueAnalysis
+from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
 from app.tools.github import GitHubClient
 
@@ -72,12 +74,30 @@ def repo_explorer_node(state: AgentState) -> AgentState:
     return {"repository_context": context.model_dump()}
 
 
+def code_writer_node(state: AgentState) -> AgentState:
+    issue = state["issue"]
+    plan = ImplementationPlan.model_validate(state["plan"])
+    repository_context = None
+    if "repository_context" in state:
+        repository_context = RepositoryContext.model_validate(state["repository_context"])
+    change_set = CodeWriter().propose_changes(
+        issue=issue,
+        plan=plan,
+        repository_context=repository_context,
+    )
+    return {
+        "code_changes": change_set.model_dump(),
+        "diff": change_set.diff,
+    }
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
     graph.add_node("issue_analyzer", issue_analyzer_node)
     graph.add_node("repo_explorer", repo_explorer_node)
     graph.add_node("planner", planner_node)
+    graph.add_node("code_writer", code_writer_node)
 
     graph.add_conditional_edges(
         START,
@@ -97,6 +117,7 @@ def build_workflow():
         },
     )
     graph.add_edge("repo_explorer", "planner")
-    graph.add_edge("planner", END)
+    graph.add_edge("planner", "code_writer")
+    graph.add_edge("code_writer", END)
 
     return graph.compile()
