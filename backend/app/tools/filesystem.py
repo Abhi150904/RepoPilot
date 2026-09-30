@@ -20,5 +20,10 @@ class WorkspaceFileSystem:
     def read_text(self, relative_path: str) -> str:
         return self.resolve_path(relative_path).read_text(encoding="utf-8")
 
+    def write_text(self, relative_path: str, content: str) -> None:
+        path = self.resolve_path(relative_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
     def file_exists(self, relative_path: str) -> bool:
         return self.resolve_path(relative_path).exists()

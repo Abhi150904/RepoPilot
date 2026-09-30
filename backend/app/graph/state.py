@@ -15,3 +15,4 @@ class AgentState(TypedDict, total=False):
     plan: dict[str, object]
     code_changes: dict[str, object]
     diff: str
+    modified_files: list[str]
