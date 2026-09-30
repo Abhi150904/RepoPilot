@@ -295,3 +295,128 @@ def test_workflow_decides_repair_for_failed_tests(monkeypatch) -> None:
     assert result["test_analysis"]["status"] == "failed"
     assert result["repair_decision"]["should_retry"] is True
     assert result["repair_decision"]["next_action"] == "repair"
+
+
+def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+    code_writer_calls = []
+    test_calls = []
+
+    class FakeCodeWriter:
+        def propose_changes(self, issue, plan, repository_context=None):
+            code_writer_calls.append(issue)
+            content = f"new value {len(code_writer_calls)}\n"
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content=content,
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        test_calls.append(Path(workspace_path, "src", "example.py").read_text())
+        if len(test_calls) == 1:
+            return ExecutionResult(
+                exit_code=1,
+                passed=0,
+                failed=1,
+                stdout="FAILED tests/test_example.py::test_example",
+                command=command,
+            )
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "workspace_path": str(root),
+                "max_repair_attempts": 1,
+            }
+        )
+
+        assert len(code_writer_calls) == 2
+        assert test_calls == ["new value 1\n", "new value 2\n"]
+        assert result["repair_attempts"] == 1
+        assert result["test_analysis"]["status"] == "passed"
+        assert result["repair_decision"]["next_action"] == "ready_for_review"
+        assert target_file.read_text(encoding="utf-8") == "new value 2\n"
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_stops_when_repair_attempts_are_exhausted(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+    code_writer_calls = []
+
+    class FakeCodeWriter:
+        def propose_changes(self, issue, plan, repository_context=None):
+            code_writer_calls.append(issue)
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content="new value\n",
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=1,
+            passed=0,
+            failed=1,
+            stdout="FAILED tests/test_example.py::test_example",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "workspace_path": str(root),
+                "max_repair_attempts": 0,
+            }
+        )
+
+        assert len(code_writer_calls) == 1
+        assert "repair_attempts" not in result
+        assert result["test_analysis"]["status"] == "failed"
+        assert result["repair_decision"]["next_action"] == "repair"
+    finally:
+        _remove_workspace_dir(root)

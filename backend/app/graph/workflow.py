@@ -11,7 +11,7 @@ from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet
-from app.schemas.execution import TestAnalysis, TestResult
+from app.schemas.execution import RepairDecision, TestAnalysis, TestResult
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
@@ -44,6 +44,20 @@ def after_code_writer_route(state: AgentState) -> str:
 def after_apply_changes_route(state: AgentState) -> str:
     if state.get("run_tests"):
         return "run_tests"
+    return "end"
+
+
+def after_repair_decision_route(state: AgentState) -> str:
+    decision = RepairDecision.model_validate(state["repair_decision"])
+    repair_attempts = state.get("repair_attempts", 0)
+    max_repair_attempts = state.get("max_repair_attempts", 1)
+
+    if (
+        decision.next_action == "repair"
+        and state.get("apply_changes")
+        and repair_attempts < max_repair_attempts
+    ):
+        return "prepare_repair"
     return "end"
 
 
@@ -153,6 +167,10 @@ def decide_repair_node(state: AgentState) -> AgentState:
     return {"repair_decision": decision.model_dump()}
 
 
+def prepare_repair_node(state: AgentState) -> AgentState:
+    return {"repair_attempts": state.get("repair_attempts", 0) + 1}
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
@@ -164,6 +182,7 @@ def build_workflow():
     graph.add_node("run_tests", run_tests_node)
     graph.add_node("analyze_tests", analyze_tests_node)
     graph.add_node("decide_repair", decide_repair_node)
+    graph.add_node("prepare_repair", prepare_repair_node)
 
     graph.add_conditional_edges(
         START,
@@ -203,6 +222,14 @@ def build_workflow():
     )
     graph.add_edge("run_tests", "analyze_tests")
     graph.add_edge("analyze_tests", "decide_repair")
-    graph.add_edge("decide_repair", END)
+    graph.add_conditional_edges(
+        "decide_repair",
+        after_repair_decision_route,
+        {
+            "prepare_repair": "prepare_repair",
+            "end": END,
+        },
+    )
+    graph.add_edge("prepare_repair", "code_writer")
 
     return graph.compile()

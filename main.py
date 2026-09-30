@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help="Command tokens to run inside the sandbox, for example: python -m pytest.",
     )
+    parser.add_argument(
+        "--max-repair-attempts",
+        type=int,
+        default=1,
+        help="Maximum automated repair retries after test failures.",
+    )
     return parser.parse_args()
 
 
@@ -63,8 +69,11 @@ def main() -> None:
     if args.run_tests:
         if not args.workspace:
             raise SystemExit("--workspace is required with --run-tests.")
+        if args.max_repair_attempts < 0:
+            raise SystemExit("--max-repair-attempts cannot be negative.")
         initial_state["run_tests"] = True
         initial_state["workspace_path"] = args.workspace
+        initial_state["max_repair_attempts"] = args.max_repair_attempts
     if args.test_command:
         if not args.run_tests:
             raise SystemExit("--test-command can only be used with --run-tests.")
@@ -125,6 +134,11 @@ def main() -> None:
         print()
         print("Repair Decision:")
         print(json.dumps(result["repair_decision"], indent=2))
+
+    if "repair_attempts" in result:
+        print()
+        print("Repair Attempts:")
+        print(result["repair_attempts"])
 
 
 if __name__ == "__main__":

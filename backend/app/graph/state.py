@@ -23,3 +23,5 @@ class AgentState(TypedDict, total=False):
     test_result: dict[str, object]
     test_analysis: dict[str, object]
     repair_decision: dict[str, object]
+    repair_attempts: int
+    max_repair_attempts: int
