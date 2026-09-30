@@ -16,3 +16,8 @@ class CodeChangeSet(BaseModel):
     summary: str
     changes: list[FileChange] = Field(default_factory=list)
     diff: str = ""
+
+
+class ChangeApplicationResult(BaseModel):
+    modified_files: list[str] = Field(default_factory=list)
+    diff: str = ""
