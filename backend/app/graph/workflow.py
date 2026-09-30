@@ -8,10 +8,13 @@ from app.agents.planner import Planner
 from app.agents.repo_explorer import RepoExplorer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
+from app.schemas.code_change import CodeChangeSet
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
+from app.tools.filesystem import WorkspaceFileSystem
 from app.tools.github import GitHubClient
+from app.tools.patch import apply_change_set
 
 
 def start_route(state: AgentState) -> str:
@@ -24,6 +27,12 @@ def after_analyzer_route(state: AgentState) -> str:
     if "repository" in state:
         return "repo_explorer"
     return "planner"
+
+
+def after_code_writer_route(state: AgentState) -> str:
+    if state.get("apply_changes"):
+        return "apply_code_changes"
+    return "end"
 
 
 def fetch_github_issue_node(state: AgentState) -> AgentState:
@@ -91,6 +100,22 @@ def code_writer_node(state: AgentState) -> AgentState:
     }
 
 
+def apply_code_changes_node(state: AgentState) -> AgentState:
+    workspace_path = state.get("workspace_path")
+    if not workspace_path:
+        raise ValueError("workspace_path is required when apply_changes is true.")
+
+    change_set = CodeChangeSet.model_validate(state["code_changes"])
+    result = apply_change_set(
+        change_set=change_set,
+        filesystem=WorkspaceFileSystem(root=workspace_path),
+    )
+    return {
+        "modified_files": result.modified_files,
+        "diff": result.diff,
+    }
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
@@ -98,6 +123,7 @@ def build_workflow():
     graph.add_node("repo_explorer", repo_explorer_node)
     graph.add_node("planner", planner_node)
     graph.add_node("code_writer", code_writer_node)
+    graph.add_node("apply_code_changes", apply_code_changes_node)
 
     graph.add_conditional_edges(
         START,
@@ -118,6 +144,14 @@ def build_workflow():
     )
     graph.add_edge("repo_explorer", "planner")
     graph.add_edge("planner", "code_writer")
-    graph.add_edge("code_writer", END)
+    graph.add_conditional_edges(
+        "code_writer",
+        after_code_writer_route,
+        {
+            "apply_code_changes": "apply_code_changes",
+            "end": END,
+        },
+    )
+    graph.add_edge("apply_code_changes", END)
 
     return graph.compile()
