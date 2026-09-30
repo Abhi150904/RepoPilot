@@ -30,6 +30,16 @@ def parse_args() -> argparse.Namespace:
         "--workspace",
         help="Local workspace path used with --apply-changes.",
     )
+    parser.add_argument(
+        "--run-tests",
+        action="store_true",
+        help="Run tests in a Docker sandbox for the given workspace.",
+    )
+    parser.add_argument(
+        "--test-command",
+        nargs="+",
+        help="Command tokens to run inside the sandbox, for example: python -m pytest.",
+    )
     return parser.parse_args()
 
 
@@ -43,13 +53,22 @@ def main() -> None:
             raise SystemExit("Both --repo and --issue are required for GitHub mode.")
         initial_state = {"repository": args.repo, "issue_number": args.issue}
 
-    if args.workspace and not args.apply_changes:
-        raise SystemExit("--workspace can only be used with --apply-changes.")
+    if args.workspace and not (args.apply_changes or args.run_tests):
+        raise SystemExit("--workspace can only be used with --apply-changes or --run-tests.")
     if args.apply_changes:
         if not args.workspace:
             raise SystemExit("--workspace is required with --apply-changes.")
         initial_state["apply_changes"] = True
         initial_state["workspace_path"] = args.workspace
+    if args.run_tests:
+        if not args.workspace:
+            raise SystemExit("--workspace is required with --run-tests.")
+        initial_state["run_tests"] = True
+        initial_state["workspace_path"] = args.workspace
+    if args.test_command:
+        if not args.run_tests:
+            raise SystemExit("--test-command can only be used with --run-tests.")
+        initial_state["test_command"] = args.test_command
 
     try:
         result = workflow.invoke(initial_state)
@@ -91,6 +110,11 @@ def main() -> None:
         print()
         print("Diff:")
         print(result["diff"])
+
+    if "test_result" in result:
+        print()
+        print("Test Result:")
+        print(json.dumps(result["test_result"], indent=2))
 
 
 if __name__ == "__main__":

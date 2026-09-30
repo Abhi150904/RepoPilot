@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
+from app.schemas.execution import TestResult as ExecutionResult
 from app.schemas.issue import GitHubIssue
 from app.schemas.repository import RepositoryFile
 from app.tools.github import GitHubError
@@ -154,6 +155,108 @@ def test_workflow_requires_workspace_path_when_applying_changes(monkeypatch) -> 
 
     try:
         workflow.invoke({"issue": "Need edit", "apply_changes": True})
+    except ValueError as exc:
+        assert "workspace_path" in str(exc)
+    else:
+        raise AssertionError("Expected workspace_path to be required.")
+
+
+def test_workflow_runs_tests_when_explicitly_enabled(monkeypatch) -> None:
+    called = {}
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        called["workspace_path"] = workspace_path
+        called["command"] = command
+        return ExecutionResult(
+            exit_code=0,
+            passed=3,
+            failed=0,
+            stdout="===== 3 passed in 0.12s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {
+            "issue": "Login endpoint needs validation",
+            "run_tests": True,
+            "workspace_path": ".",
+            "test_command": ["python", "-m", "pytest"],
+        }
+    )
+
+    assert called == {
+        "workspace_path": ".",
+        "command": ["python", "-m", "pytest"],
+    }
+    assert result["test_result"]["exit_code"] == 0
+    assert result["test_result"]["passed"] == 3
+    assert result["test_result"]["failed"] == 0
+
+
+def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+    events = []
+
+    class FakeCodeWriter:
+        def propose_changes(self, issue, plan, repository_context=None):
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content="new value\n",
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        events.append(("test", Path(workspace_path, "src", "example.py").read_text()))
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "workspace_path": str(root),
+            }
+        )
+
+        assert result["modified_files"] == ["src/example.py"]
+        assert result["test_result"]["passed"] == 1
+        assert events == [("test", "new value\n")]
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_requires_workspace_path_when_running_tests() -> None:
+    workflow = build_workflow()
+
+    try:
+        workflow.invoke({"issue": "Need tests", "run_tests": True})
     except ValueError as exc:
         assert "workspace_path" in str(exc)
     else:

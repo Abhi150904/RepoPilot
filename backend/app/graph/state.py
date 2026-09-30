@@ -18,3 +18,6 @@ class AgentState(TypedDict, total=False):
     apply_changes: bool
     workspace_path: str
     modified_files: list[str]
+    run_tests: bool
+    test_command: list[str]
+    test_result: dict[str, object]
