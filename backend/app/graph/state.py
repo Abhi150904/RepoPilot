@@ -21,3 +21,4 @@ class AgentState(TypedDict, total=False):
     run_tests: bool
     test_command: list[str]
     test_result: dict[str, object]
+    test_analysis: dict[str, object]

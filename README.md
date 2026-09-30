@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 4.1**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, and optionally run tests in a Docker sandbox.
+This repository currently implements **Version 4.2**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, and analyze the test outcome.
 
 ## Version 0 Workflow
 
@@ -115,6 +115,16 @@ code writer
 
 The sandbox runner executes an explicit command inside Docker with no network access, CPU and memory limits, a timeout, and capped output. It is opt-in and requires a local workspace path.
 
+## Version 4.2 Test Result Analysis
+
+```text
+run_tests
+  -> analyze_tests
+  -> test analysis
+```
+
+Raw sandbox output is converted into a compact workflow decision: passed, failed, timed out, or command error. This gives later review and retry steps a stable signal instead of requiring them to parse stdout and stderr directly.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -136,6 +146,7 @@ backend/
       coder.py
       planner.py
       repo_explorer.py
+      test_analyzer.py
     core/
       config.py
       llm.py

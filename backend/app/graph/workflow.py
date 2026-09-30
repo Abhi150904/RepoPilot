@@ -6,6 +6,7 @@ from app.agents.analyzer import IssueAnalyzer
 from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
 from app.agents.repo_explorer import RepoExplorer
+from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet
@@ -139,6 +140,12 @@ def run_tests_node(state: AgentState) -> AgentState:
     return {"test_result": result.model_dump()}
 
 
+def analyze_tests_node(state: AgentState) -> AgentState:
+    result = TestResult.model_validate(state["test_result"])
+    analysis = TestAnalyzer().analyze(result)
+    return {"test_analysis": analysis.model_dump()}
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
@@ -148,6 +155,7 @@ def build_workflow():
     graph.add_node("code_writer", code_writer_node)
     graph.add_node("apply_code_changes", apply_code_changes_node)
     graph.add_node("run_tests", run_tests_node)
+    graph.add_node("analyze_tests", analyze_tests_node)
 
     graph.add_conditional_edges(
         START,
@@ -185,6 +193,7 @@ def build_workflow():
             "end": END,
         },
     )
-    graph.add_edge("run_tests", END)
+    graph.add_edge("run_tests", "analyze_tests")
+    graph.add_edge("analyze_tests", END)
 
     return graph.compile()

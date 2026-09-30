@@ -116,6 +116,11 @@ def main() -> None:
         print("Test Result:")
         print(json.dumps(result["test_result"], indent=2))
 
+    if "test_analysis" in result:
+        print()
+        print("Test Analysis:")
+        print(json.dumps(result["test_analysis"], indent=2))
+
 
 if __name__ == "__main__":
     main()

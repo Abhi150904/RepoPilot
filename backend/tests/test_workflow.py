@@ -196,6 +196,8 @@ def test_workflow_runs_tests_when_explicitly_enabled(monkeypatch) -> None:
     assert result["test_result"]["exit_code"] == 0
     assert result["test_result"]["passed"] == 3
     assert result["test_result"]["failed"] == 0
+    assert result["test_analysis"]["status"] == "passed"
+    assert result["test_analysis"]["next_action"] == "ready_for_review"
 
 
 def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
@@ -247,6 +249,7 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
 
         assert result["modified_files"] == ["src/example.py"]
         assert result["test_result"]["passed"] == 1
+        assert result["test_analysis"]["status"] == "passed"
         assert events == [("test", "new value\n")]
     finally:
         _remove_workspace_dir(root)
