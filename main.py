@@ -21,6 +21,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the RepoPilot workflow.")
     parser.add_argument("--repo", help="GitHub repository in owner/name format.")
     parser.add_argument("--issue", type=int, help="GitHub issue number.")
+    parser.add_argument(
+        "--apply-changes",
+        action="store_true",
+        help="Apply structured code changes to a local workspace.",
+    )
+    parser.add_argument(
+        "--workspace",
+        help="Local workspace path used with --apply-changes.",
+    )
     return parser.parse_args()
 
 
@@ -33,6 +42,14 @@ def main() -> None:
         if not args.repo or not args.issue:
             raise SystemExit("Both --repo and --issue are required for GitHub mode.")
         initial_state = {"repository": args.repo, "issue_number": args.issue}
+
+    if args.workspace and not args.apply_changes:
+        raise SystemExit("--workspace can only be used with --apply-changes.")
+    if args.apply_changes:
+        if not args.workspace:
+            raise SystemExit("--workspace is required with --apply-changes.")
+        initial_state["apply_changes"] = True
+        initial_state["workspace_path"] = args.workspace
 
     try:
         result = workflow.invoke(initial_state)
@@ -64,6 +81,11 @@ def main() -> None:
         print()
         print("Code Changes:")
         print(json.dumps(result["code_changes"], indent=2))
+
+    if "modified_files" in result:
+        print()
+        print("Modified Files:")
+        print(json.dumps(result["modified_files"], indent=2))
 
     if result.get("diff"):
         print()

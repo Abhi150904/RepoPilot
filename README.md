@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 3.0**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, and produce a controlled code-change proposal with a diff.
+This repository currently implements **Version 3.1**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, and optionally apply structured changes to an explicit local workspace.
 
 ## Version 0 Workflow
 
@@ -95,7 +95,14 @@ GitHub issue
   -> unified diff
 ```
 
-The current code writer is intentionally controlled. It proposes patch placeholders for retrieved target files and renders a diff, but it does not yet apply arbitrary generated edits to the repository.
+The code writer is intentionally controlled. It proposes patch placeholders for retrieved target files and renders a diff. Structured changes can be applied only when explicitly enabled with a local workspace path.
+
+```text
+code writer
+  -> optional apply_code_changes
+  -> modified files
+  -> actual diff
+```
 
 The CLI uses a hard-coded issue:
 
@@ -139,7 +146,10 @@ backend/
       plan.py
       repository.py
     tools/
+      filesystem.py
+      git.py
       github.py
+      patch.py
   tests/
 main.py
 ```
@@ -168,6 +178,14 @@ To run against a GitHub issue:
 python main.py --repo owner/name --issue 123
 ```
 
+To explicitly apply structured changes to a local workspace:
+
+```bash
+python main.py --apply-changes --workspace path/to/workspace
+```
+
+`--workspace` is only accepted with `--apply-changes`.
+
 ## Test
 
 ```bash
@@ -189,6 +207,7 @@ pytest
 - **Hybrid retrieval uses reciprocal rank fusion** so chunks found by multiple retrievers rise without comparing incompatible raw scores.
 - **Reranking is explicit and replaceable** so a model-backed reranker can be added later without changing graph orchestration.
 - **Code writing is controlled in Version 3** so the system can expose structured proposed changes and diffs before executing tests or mutating real repositories.
+- **Applying changes is opt-in** and requires an explicit workspace path, so normal GitHub issue runs do not write files.
 
 ## Not Implemented Yet
 
