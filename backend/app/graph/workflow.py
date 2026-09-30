@@ -5,12 +5,13 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.analyzer import IssueAnalyzer
 from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
+from app.agents.repair_decider import RepairDecider
 from app.agents.repo_explorer import RepoExplorer
 from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet
-from app.schemas.execution import TestResult
+from app.schemas.execution import TestAnalysis, TestResult
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
@@ -146,6 +147,12 @@ def analyze_tests_node(state: AgentState) -> AgentState:
     return {"test_analysis": analysis.model_dump()}
 
 
+def decide_repair_node(state: AgentState) -> AgentState:
+    analysis = TestAnalysis.model_validate(state["test_analysis"])
+    decision = RepairDecider().decide(analysis)
+    return {"repair_decision": decision.model_dump()}
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
@@ -156,6 +163,7 @@ def build_workflow():
     graph.add_node("apply_code_changes", apply_code_changes_node)
     graph.add_node("run_tests", run_tests_node)
     graph.add_node("analyze_tests", analyze_tests_node)
+    graph.add_node("decide_repair", decide_repair_node)
 
     graph.add_conditional_edges(
         START,
@@ -194,6 +202,7 @@ def build_workflow():
         },
     )
     graph.add_edge("run_tests", "analyze_tests")
-    graph.add_edge("analyze_tests", END)
+    graph.add_edge("analyze_tests", "decide_repair")
+    graph.add_edge("decide_repair", END)
 
     return graph.compile()

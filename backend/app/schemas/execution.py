@@ -20,3 +20,9 @@ class TestAnalysis(BaseModel):
     summary: str
     failure_reason: str | None = None
     next_action: Literal["ready_for_review", "inspect_failure", "rerun_tests"]
+
+
+class RepairDecision(BaseModel):
+    should_retry: bool
+    next_action: Literal["ready_for_review", "repair", "rerun_tests", "stop"]
+    reason: str

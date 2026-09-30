@@ -198,6 +198,8 @@ def test_workflow_runs_tests_when_explicitly_enabled(monkeypatch) -> None:
     assert result["test_result"]["failed"] == 0
     assert result["test_analysis"]["status"] == "passed"
     assert result["test_analysis"]["next_action"] == "ready_for_review"
+    assert result["repair_decision"]["should_retry"] is False
+    assert result["repair_decision"]["next_action"] == "ready_for_review"
 
 
 def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
@@ -250,6 +252,7 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
         assert result["modified_files"] == ["src/example.py"]
         assert result["test_result"]["passed"] == 1
         assert result["test_analysis"]["status"] == "passed"
+        assert result["repair_decision"]["next_action"] == "ready_for_review"
         assert events == [("test", "new value\n")]
     finally:
         _remove_workspace_dir(root)
@@ -264,3 +267,31 @@ def test_workflow_requires_workspace_path_when_running_tests() -> None:
         assert "workspace_path" in str(exc)
     else:
         raise AssertionError("Expected workspace_path to be required.")
+
+
+def test_workflow_decides_repair_for_failed_tests(monkeypatch) -> None:
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=1,
+            passed=1,
+            failed=1,
+            stdout="FAILED tests/test_login.py::test_missing_email",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {
+            "issue": "Login endpoint needs validation",
+            "run_tests": True,
+            "workspace_path": ".",
+        }
+    )
+
+    assert result["test_analysis"]["status"] == "failed"
+    assert result["repair_decision"]["should_retry"] is True
+    assert result["repair_decision"]["next_action"] == "repair"

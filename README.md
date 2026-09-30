@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 4.2**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, and analyze the test outcome.
+This repository currently implements **Version 4.3**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, and decide whether a repair pass is appropriate.
 
 ## Version 0 Workflow
 
@@ -125,6 +125,16 @@ run_tests
 
 Raw sandbox output is converted into a compact workflow decision: passed, failed, timed out, or command error. This gives later review and retry steps a stable signal instead of requiring them to parse stdout and stderr directly.
 
+## Version 4.3 Repair Decision
+
+```text
+analyze_tests
+  -> decide_repair
+  -> repair decision
+```
+
+The repair decider turns test analysis into the next workflow action: ready for review, attempt a repair, rerun tests, or stop for human inspection. This version records the decision but does not loop back into code writing yet.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -145,6 +155,7 @@ backend/
       analyzer.py
       coder.py
       planner.py
+      repair_decider.py
       repo_explorer.py
       test_analyzer.py
     core/
@@ -245,6 +256,7 @@ pytest
 - **Code writing is controlled in Version 3** so the system can expose structured proposed changes and diffs before executing tests or mutating real repositories.
 - **Applying changes is opt-in** and requires an explicit workspace path, so normal GitHub issue runs do not write files.
 - **Sandbox testing is opt-in** and runs explicit command tokens in a restricted Docker container instead of passing user input through a shell.
+- **Repair decisions are separate from repair execution** so the workflow can expose why it would retry before adding graph loops.
 
 ## Not Implemented Yet
 

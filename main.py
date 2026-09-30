@@ -121,6 +121,11 @@ def main() -> None:
         print("Test Analysis:")
         print(json.dumps(result["test_analysis"], indent=2))
 
+    if "repair_decision" in result:
+        print()
+        print("Repair Decision:")
+        print(json.dumps(result["repair_decision"], indent=2))
+
 
 if __name__ == "__main__":
     main()
