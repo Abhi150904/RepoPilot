@@ -5,16 +5,21 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.analyzer import IssueAnalyzer
 from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
+from app.agents.repair_decider import RepairDecider
 from app.agents.repo_explorer import RepoExplorer
+from app.agents.run_summarizer import RunSummarizer
+from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet
+from app.schemas.execution import RepairContext, RepairDecision, TestAnalysis, TestResult
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
 from app.tools.filesystem import WorkspaceFileSystem
 from app.tools.github import GitHubClient
 from app.tools.patch import apply_change_set
+from app.tools.sandbox import run_tests_in_docker
 
 
 def start_route(state: AgentState) -> str:
@@ -32,6 +37,28 @@ def after_analyzer_route(state: AgentState) -> str:
 def after_code_writer_route(state: AgentState) -> str:
     if state.get("apply_changes"):
         return "apply_code_changes"
+    if state.get("run_tests"):
+        return "run_tests"
+    return "end"
+
+
+def after_apply_changes_route(state: AgentState) -> str:
+    if state.get("run_tests"):
+        return "run_tests"
+    return "end"
+
+
+def after_repair_decision_route(state: AgentState) -> str:
+    decision = RepairDecision.model_validate(state["repair_decision"])
+    repair_attempts = state.get("repair_attempts", 0)
+    max_repair_attempts = state.get("max_repair_attempts", 1)
+
+    if (
+        decision.next_action == "repair"
+        and state.get("apply_changes")
+        and repair_attempts < max_repair_attempts
+    ):
+        return "prepare_repair"
     return "end"
 
 
@@ -89,10 +116,14 @@ def code_writer_node(state: AgentState) -> AgentState:
     repository_context = None
     if "repository_context" in state:
         repository_context = RepositoryContext.model_validate(state["repository_context"])
+    repair_context = None
+    if "repair_context" in state:
+        repair_context = RepairContext.model_validate(state["repair_context"])
     change_set = CodeWriter().propose_changes(
         issue=issue,
         plan=plan,
         repository_context=repository_context,
+        repair_context=repair_context,
     )
     return {
         "code_changes": change_set.model_dump(),
@@ -116,6 +147,52 @@ def apply_code_changes_node(state: AgentState) -> AgentState:
     }
 
 
+def run_tests_node(state: AgentState) -> AgentState:
+    workspace_path = state.get("workspace_path")
+    if not workspace_path:
+        raise ValueError("workspace_path is required when run_tests is true.")
+
+    command = state.get("test_command", ["python", "-m", "pytest", "-p", "no:cacheprovider"])
+    result: TestResult = run_tests_in_docker(
+        workspace_path=workspace_path,
+        command=command,
+    )
+    return {"test_result": result.model_dump()}
+
+
+def analyze_tests_node(state: AgentState) -> AgentState:
+    result = TestResult.model_validate(state["test_result"])
+    analysis = TestAnalyzer().analyze(result)
+    return {"test_analysis": analysis.model_dump()}
+
+
+def decide_repair_node(state: AgentState) -> AgentState:
+    analysis = TestAnalysis.model_validate(state["test_analysis"])
+    decision = RepairDecider().decide(analysis)
+    return {"repair_decision": decision.model_dump()}
+
+
+def prepare_repair_node(state: AgentState) -> AgentState:
+    attempt = state.get("repair_attempts", 0) + 1
+    analysis = TestAnalysis.model_validate(state["test_analysis"])
+    context = RepairContext(
+        attempt=attempt,
+        test_status=analysis.status,
+        test_summary=analysis.summary,
+        failure_reason=analysis.failure_reason,
+        previous_diff=state.get("diff", ""),
+    )
+    return {
+        "repair_attempts": attempt,
+        "repair_context": context.model_dump(),
+    }
+
+
+def summarize_run_node(state: AgentState) -> AgentState:
+    summary = RunSummarizer().summarize(dict(state))
+    return {"run_summary": summary.model_dump()}
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
@@ -124,6 +201,11 @@ def build_workflow():
     graph.add_node("planner", planner_node)
     graph.add_node("code_writer", code_writer_node)
     graph.add_node("apply_code_changes", apply_code_changes_node)
+    graph.add_node("run_tests", run_tests_node)
+    graph.add_node("analyze_tests", analyze_tests_node)
+    graph.add_node("decide_repair", decide_repair_node)
+    graph.add_node("prepare_repair", prepare_repair_node)
+    graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
         START,
@@ -149,9 +231,29 @@ def build_workflow():
         after_code_writer_route,
         {
             "apply_code_changes": "apply_code_changes",
-            "end": END,
+            "run_tests": "run_tests",
+            "end": "summarize_run",
         },
     )
-    graph.add_edge("apply_code_changes", END)
+    graph.add_conditional_edges(
+        "apply_code_changes",
+        after_apply_changes_route,
+        {
+            "run_tests": "run_tests",
+            "end": "summarize_run",
+        },
+    )
+    graph.add_edge("run_tests", "analyze_tests")
+    graph.add_edge("analyze_tests", "decide_repair")
+    graph.add_conditional_edges(
+        "decide_repair",
+        after_repair_decision_route,
+        {
+            "prepare_repair": "prepare_repair",
+            "end": "summarize_run",
+        },
+    )
+    graph.add_edge("prepare_repair", "code_writer")
+    graph.add_edge("summarize_run", END)
 
     return graph.compile()

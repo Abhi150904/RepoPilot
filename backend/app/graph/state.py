@@ -18,3 +18,12 @@ class AgentState(TypedDict, total=False):
     apply_changes: bool
     workspace_path: str
     modified_files: list[str]
+    run_tests: bool
+    test_command: list[str]
+    test_result: dict[str, object]
+    test_analysis: dict[str, object]
+    repair_decision: dict[str, object]
+    repair_attempts: int
+    max_repair_attempts: int
+    repair_context: dict[str, object]
+    run_summary: dict[str, object]

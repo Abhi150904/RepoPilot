@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from app.agents.run_summarizer import RunSummarizer
+
+
+def test_run_summarizer_marks_planned_only_without_changes() -> None:
+    summary = RunSummarizer().summarize({"code_changes": {"changes": []}})
+
+    assert summary.status == "planned_only"
+    assert summary.tests_passed is None
+    assert summary.next_action == "review_plan"
+
+
+def test_run_summarizer_marks_changes_proposed() -> None:
+    summary = RunSummarizer().summarize(
+        {"code_changes": {"changes": [{"path": "src/example.py"}]}}
+    )
+
+    assert summary.status == "changes_proposed"
+    assert summary.next_action == "review_diff"
+
+
+def test_run_summarizer_marks_tests_passed_after_repair() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "repair_attempts": 1,
+            "test_analysis": {
+                "status": "passed",
+                "summary": "The sandbox test command passed 1 test(s).",
+                "failure_reason": None,
+                "next_action": "ready_for_review",
+            },
+        }
+    )
+
+    assert summary.status == "ready_for_review"
+    assert summary.tests_passed is True
+    assert summary.repair_attempts == 1
+    assert "after 1 repair" in summary.summary
+
+
+def test_run_summarizer_marks_repair_failed() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "repair_attempts": 1,
+            "test_analysis": {
+                "status": "failed",
+                "summary": "The sandbox test command failed with 1 failing test(s).",
+                "failure_reason": "FAILED tests/test_example.py::test_example",
+                "next_action": "inspect_failure",
+            },
+            "repair_decision": {
+                "should_retry": True,
+                "next_action": "repair",
+                "reason": "Tests failed with captured failure output.",
+            },
+        }
+    )
+
+    assert summary.status == "repair_failed"
+    assert summary.tests_passed is False
+    assert summary.next_action == "inspect_failure"
+
+
+def test_run_summarizer_marks_command_errors_as_needing_human_action() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "test_analysis": {
+                "status": "error",
+                "summary": "The sandbox test command exited with code 127.",
+                "failure_reason": "python: command not found",
+                "next_action": "rerun_tests",
+            },
+        }
+    )
+
+    assert summary.status == "needs_human"
+    assert summary.tests_passed is False
+    assert summary.next_action == "rerun_tests"

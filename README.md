@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 3.1**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, and optionally apply structured changes to an explicit local workspace.
+This repository currently implements **Version 4.6**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, decide whether a repair pass is appropriate, perform a bounded repair retry, pass failure context into repair attempts, and produce a final run summary.
 
 ## Version 0 Workflow
 
@@ -104,6 +104,69 @@ code writer
   -> actual diff
 ```
 
+## Version 4.1 Sandbox Test Runner
+
+```text
+code writer
+  -> optional apply_code_changes
+  -> optional run_tests
+  -> test result
+```
+
+The sandbox runner executes an explicit command inside Docker with no network access, CPU and memory limits, a timeout, and capped output. It is opt-in and requires a local workspace path.
+
+## Version 4.2 Test Result Analysis
+
+```text
+run_tests
+  -> analyze_tests
+  -> test analysis
+```
+
+Raw sandbox output is converted into a compact workflow decision: passed, failed, timed out, or command error. This gives later review and retry steps a stable signal instead of requiring them to parse stdout and stderr directly.
+
+## Version 4.3 Repair Decision
+
+```text
+analyze_tests
+  -> decide_repair
+  -> repair decision
+```
+
+The repair decider turns test analysis into the next workflow action: ready for review, attempt a repair, rerun tests, or stop for human inspection.
+
+## Version 4.4 Bounded Repair Loop
+
+```text
+decide_repair
+  -> optional prepare_repair
+  -> code_writer
+  -> apply_code_changes
+  -> run_tests
+```
+
+The workflow can now perform a bounded automated repair retry when tests fail with useful failure output. Repair attempts are counted in graph state and limited by `max_repair_attempts`, which defaults to one.
+
+## Version 4.5 Repair Context Injection
+
+```text
+prepare_repair
+  -> repair context
+  -> code_writer
+```
+
+Repair retries now receive structured context from the failed test run, including the attempt number, test status, summary, failure reason, and previous diff. The controlled code writer includes that context in the repair patch proposal so retries are guided by the failure instead of being blind repeats.
+
+## Version 4.6 Final Run Summary
+
+```text
+workflow result
+  -> summarize_run
+  -> run summary
+```
+
+Every workflow path now ends with a compact final verdict such as `planned_only`, `changes_proposed`, `ready_for_review`, `repair_failed`, or `needs_human`. This gives CLI users and future API/UI layers one stable object to inspect before digging into intermediate state.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -124,7 +187,10 @@ backend/
       analyzer.py
       coder.py
       planner.py
+      repair_decider.py
       repo_explorer.py
+      run_summarizer.py
+      test_analyzer.py
     core/
       config.py
       llm.py
@@ -142,6 +208,7 @@ backend/
       vector.py
     schemas/
       code_change.py
+      execution.py
       issue.py
       plan.py
       repository.py
@@ -150,6 +217,7 @@ backend/
       git.py
       github.py
       patch.py
+      sandbox.py
   tests/
 main.py
 ```
@@ -184,7 +252,25 @@ To explicitly apply structured changes to a local workspace:
 python main.py --apply-changes --workspace path/to/workspace
 ```
 
-`--workspace` is only accepted with `--apply-changes`.
+To run tests in a Docker sandbox for a local workspace:
+
+```bash
+python main.py --run-tests --workspace path/to/workspace
+```
+
+To apply changes first and then run a custom test command:
+
+```bash
+python main.py --apply-changes --run-tests --workspace path/to/workspace --test-command python -m pytest
+```
+
+To change the retry limit:
+
+```bash
+python main.py --apply-changes --run-tests --workspace path/to/workspace --max-repair-attempts 0
+```
+
+`--workspace` is only accepted with `--apply-changes` or `--run-tests`.
 
 ## Test
 
@@ -208,7 +294,11 @@ pytest
 - **Reranking is explicit and replaceable** so a model-backed reranker can be added later without changing graph orchestration.
 - **Code writing is controlled in Version 3** so the system can expose structured proposed changes and diffs before executing tests or mutating real repositories.
 - **Applying changes is opt-in** and requires an explicit workspace path, so normal GitHub issue runs do not write files.
+- **Sandbox testing is opt-in** and runs explicit command tokens in a restricted Docker container instead of passing user input through a shell.
+- **Repair attempts are bounded** so automated retry behavior is explicit and cannot loop forever.
+- **Repair context is structured** so future model-backed repair can use failure details without scraping raw test output.
+- **Run summaries are final workflow outputs** so users can read one verdict before inspecting detailed agent state.
 
 ## Not Implemented Yet
 
-This version intentionally does not include Qdrant, model-backed reranking, Docker sandboxing, test execution, FastAPI, a frontend, databases, pull request creation, or human approval.
+This version intentionally does not include Qdrant, model-backed reranking, automatic dependency installation inside sandbox images, FastAPI, a frontend, databases, pull request creation, or human approval.

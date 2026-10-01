@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.schemas.code_change import CodeChangeSet, FileChange
+from app.schemas.execution import RepairContext
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
 from app.tools.git import render_change_set_diff
@@ -14,6 +15,7 @@ class CodeWriter:
         issue: str,
         plan: ImplementationPlan,
         repository_context: RepositoryContext | None = None,
+        repair_context: RepairContext | None = None,
     ) -> CodeChangeSet:
         target_files = _select_target_files(plan=plan, repository_context=repository_context)
         originals = _context_previews_by_path(repository_context)
@@ -30,6 +32,7 @@ class CodeWriter:
                     plan=plan,
                     path=path,
                     original_content=originals.get(path, ""),
+                    repair_context=repair_context,
                 ),
             )
             for path in target_files
@@ -68,11 +71,13 @@ def _build_patch_placeholder(
     plan: ImplementationPlan,
     path: str,
     original_content: str,
+    repair_context: RepairContext | None = None,
 ) -> str:
     comment = _comment_prefix(path)
     steps = "\n".join(f"{comment} - {step}" for step in plan.steps)
     tests = "\n".join(f"{comment} - {test}" for test in plan.tests_required)
     prefix = f"{original_content.rstrip()}\n\n" if original_content.strip() else ""
+    repair_note = _build_repair_note(comment=comment, repair_context=repair_context)
     return (
         f"{prefix}"
         f"{comment} RepoPilot patch proposal\n"
@@ -85,6 +90,7 @@ def _build_patch_placeholder(
         f"{comment}\n"
         f"{comment} Tests to add or update:\n"
         f"{tests}\n"
+        f"{repair_note}"
     )
 
 
@@ -92,3 +98,18 @@ def _comment_prefix(path: str) -> str:
     if path.endswith((".ts", ".tsx", ".js", ".jsx", ".java", ".go", ".rs", ".c", ".cpp", ".h")):
         return "//"
     return "#"
+
+
+def _build_repair_note(comment: str, repair_context: RepairContext | None) -> str:
+    if not repair_context:
+        return ""
+
+    reason = repair_context.failure_reason or "No failure reason captured."
+    return (
+        f"{comment}\n"
+        f"{comment} Repair context:\n"
+        f"{comment} - Attempt: {repair_context.attempt}\n"
+        f"{comment} - Test status: {repair_context.test_status}\n"
+        f"{comment} - Test summary: {repair_context.test_summary}\n"
+        f"{comment} - Failure reason: {reason}\n"
+    )
