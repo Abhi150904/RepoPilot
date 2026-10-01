@@ -33,6 +33,7 @@ def test_version_zero_workflow_produces_analysis_and_plan() -> None:
     assert "email" in result["analysis"]["summary"]
     assert result["plan"]["steps"]
     assert result["plan"]["tests_required"]
+    assert result["run_summary"]["status"] == "planned_only"
     assert "modified_files" not in result
 
 
@@ -200,6 +201,8 @@ def test_workflow_runs_tests_when_explicitly_enabled(monkeypatch) -> None:
     assert result["test_analysis"]["next_action"] == "ready_for_review"
     assert result["repair_decision"]["should_retry"] is False
     assert result["repair_decision"]["next_action"] == "ready_for_review"
+    assert result["run_summary"]["status"] == "ready_for_review"
+    assert result["run_summary"]["tests_passed"] is True
 
 
 def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
@@ -368,6 +371,8 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
         assert result["repair_context"]["failure_reason"] == "FAILED tests/test_example.py::test_example"
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
+        assert result["run_summary"]["status"] == "ready_for_review"
+        assert result["run_summary"]["repair_attempts"] == 1
         assert target_file.read_text(encoding="utf-8") == "new value 2\n"
     finally:
         _remove_workspace_dir(root)
@@ -425,5 +430,59 @@ def test_workflow_stops_when_repair_attempts_are_exhausted(monkeypatch) -> None:
         assert "repair_attempts" not in result
         assert result["test_analysis"]["status"] == "failed"
         assert result["repair_decision"]["next_action"] == "repair"
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_summarizes_failed_repair_attempt(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+
+    class FakeCodeWriter:
+        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content="new value\n",
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=1,
+            passed=0,
+            failed=1,
+            stdout="FAILED tests/test_example.py::test_example",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "workspace_path": str(root),
+                "max_repair_attempts": 1,
+            }
+        )
+
+        assert result["repair_attempts"] == 1
+        assert result["test_analysis"]["status"] == "failed"
+        assert result["run_summary"]["status"] == "repair_failed"
+        assert result["run_summary"]["tests_passed"] is False
     finally:
         _remove_workspace_dir(root)

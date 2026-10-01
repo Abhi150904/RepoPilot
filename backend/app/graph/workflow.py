@@ -7,6 +7,7 @@ from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
 from app.agents.repair_decider import RepairDecider
 from app.agents.repo_explorer import RepoExplorer
+from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
@@ -187,6 +188,11 @@ def prepare_repair_node(state: AgentState) -> AgentState:
     }
 
 
+def summarize_run_node(state: AgentState) -> AgentState:
+    summary = RunSummarizer().summarize(dict(state))
+    return {"run_summary": summary.model_dump()}
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
@@ -199,6 +205,7 @@ def build_workflow():
     graph.add_node("analyze_tests", analyze_tests_node)
     graph.add_node("decide_repair", decide_repair_node)
     graph.add_node("prepare_repair", prepare_repair_node)
+    graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
         START,
@@ -225,7 +232,7 @@ def build_workflow():
         {
             "apply_code_changes": "apply_code_changes",
             "run_tests": "run_tests",
-            "end": END,
+            "end": "summarize_run",
         },
     )
     graph.add_conditional_edges(
@@ -233,7 +240,7 @@ def build_workflow():
         after_apply_changes_route,
         {
             "run_tests": "run_tests",
-            "end": END,
+            "end": "summarize_run",
         },
     )
     graph.add_edge("run_tests", "analyze_tests")
@@ -243,9 +250,10 @@ def build_workflow():
         after_repair_decision_route,
         {
             "prepare_repair": "prepare_repair",
-            "end": END,
+            "end": "summarize_run",
         },
     )
     graph.add_edge("prepare_repair", "code_writer")
+    graph.add_edge("summarize_run", END)
 
     return graph.compile()

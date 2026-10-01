@@ -34,3 +34,26 @@ class RepairContext(BaseModel):
     test_summary: str
     failure_reason: str | None = None
     previous_diff: str = ""
+
+
+class RunSummary(BaseModel):
+    status: Literal[
+        "planned_only",
+        "changes_proposed",
+        "changes_applied",
+        "ready_for_review",
+        "repair_needed",
+        "repair_failed",
+        "needs_human",
+    ]
+    summary: str
+    tests_passed: bool | None = None
+    repair_attempts: int = 0
+    next_action: Literal[
+        "review_plan",
+        "review_diff",
+        "commit_changes",
+        "inspect_failure",
+        "rerun_tests",
+        "human_review",
+    ]

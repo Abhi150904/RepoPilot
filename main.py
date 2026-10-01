@@ -145,6 +145,11 @@ def main() -> None:
         print("Repair Attempts:")
         print(result["repair_attempts"])
 
+    if "run_summary" in result:
+        print()
+        print("Run Summary:")
+        print(json.dumps(result["run_summary"], indent=2))
+
 
 if __name__ == "__main__":
     main()
