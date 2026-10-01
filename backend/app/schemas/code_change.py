@@ -5,6 +5,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class SourceFile(BaseModel):
+    path: str
+    content: str
+    exists: bool = True
+
+
 class FileChange(BaseModel):
     path: str
     action: Literal["modify", "create"]

@@ -2,14 +2,26 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import subprocess
 from uuid import uuid4
 
+import pytest
+
+from app.core.llm import MockLLMProvider
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
 from app.schemas.execution import TestResult as ExecutionResult
 from app.schemas.issue import GitHubIssue
+from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryFile
 from app.tools.github import GitHubError
+
+
+@pytest.fixture(autouse=True)
+def use_mock_llm_provider(monkeypatch) -> None:
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "get_llm", lambda role: MockLLMProvider())
 
 
 def _make_workspace_dir() -> Path:
@@ -59,6 +71,12 @@ def test_github_issue_workflow_fetches_issue_and_repository_context(monkeypatch)
 
         def read_file(self, repo: str, path: str) -> str:
             assert repo == "example/demo"
+            if path == "src/routes/login.py":
+                return (
+                    "def login(payload):\n"
+                    "    email = payload[\"email\"]\n"
+                    "    return {\"email\": email}\n"
+                )
             return f"# contents for {path}\n"
 
         def search_code(self, repo: str, query: str) -> list[str]:
@@ -106,7 +124,12 @@ def test_workflow_applies_code_changes_only_when_explicitly_enabled(monkeypatch)
     target_file.write_text("old value\n", encoding="utf-8")
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self, issue, analysis=None, plan=None, target_files=None, repository_context=None, repair_context=None
+        ):
             return CodeChangeSet(
                 summary="Update example",
                 changes=[
@@ -143,7 +166,12 @@ def test_workflow_applies_code_changes_only_when_explicitly_enabled(monkeypatch)
 
 def test_workflow_requires_workspace_path_when_applying_changes(monkeypatch) -> None:
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self, issue, analysis=None, plan=None, target_files=None, repository_context=None, repair_context=None
+        ):
             return CodeChangeSet(
                 summary="Noop",
                 changes=[],
@@ -213,7 +241,12 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
     events = []
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self, issue, analysis=None, plan=None, target_files=None, repository_context=None, repair_context=None
+        ):
             return CodeChangeSet(
                 summary="Update example",
                 changes=[
@@ -309,7 +342,12 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
     test_calls = []
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self, issue, analysis=None, plan=None, target_files=None, repository_context=None, repair_context=None
+        ):
             code_writer_calls.append(repair_context)
             content = f"new value {len(code_writer_calls)}\n"
             return CodeChangeSet(
@@ -386,7 +424,12 @@ def test_workflow_stops_when_repair_attempts_are_exhausted(monkeypatch) -> None:
     code_writer_calls = []
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self, issue, analysis=None, plan=None, target_files=None, repository_context=None, repair_context=None
+        ):
             code_writer_calls.append(issue)
             return CodeChangeSet(
                 summary="Update example",
@@ -441,7 +484,12 @@ def test_workflow_summarizes_failed_repair_attempt(monkeypatch) -> None:
     target_file.write_text("old value\n", encoding="utf-8")
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self, issue, analysis=None, plan=None, target_files=None, repository_context=None, repair_context=None
+        ):
             return CodeChangeSet(
                 summary="Update example",
                 changes=[
@@ -484,5 +532,81 @@ def test_workflow_summarizes_failed_repair_attempt(monkeypatch) -> None:
         assert result["test_analysis"]["status"] == "failed"
         assert result["run_summary"]["status"] == "repair_failed"
         assert result["run_summary"]["tests_passed"] is False
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_fixes_broken_python_fixture_end_to_end(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    app_file = root / "app.py"
+    test_file = root / "test_app.py"
+    app_file.write_text(
+        "def login(payload):\n"
+        "    email = payload[\"email\"]\n"
+        "    return {\"email\": email}\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from app import login\n\n"
+        "def test_missing_email_returns_validation_error():\n"
+        "    response, status = login({})\n"
+        "    assert status == 400\n"
+        "    assert response == {\"error\": \"email is required\"}\n",
+        encoding="utf-8",
+    )
+
+    class FakePlanner:
+        def __init__(self, llm=None):
+            pass
+
+        def create_plan(self, issue, analysis, repository_context=None):
+            return ImplementationPlan(
+                summary="Validate missing email before reading the payload.",
+                steps=["Add an email validation guard."],
+                files_to_inspect=["app.py"],
+                tests_required=["missing email returns validation error"],
+            )
+
+    def run_local_pytest(workspace_path, command):
+        completed = subprocess.run(
+            ["python", "-m", "pytest", "-p", "no:cacheprovider"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        failed = 1 if completed.returncode else 0
+        passed = 1 if completed.returncode == 0 else 0
+        return ExecutionResult(
+            exit_code=completed.returncode,
+            passed=passed,
+            failed=failed,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "Planner", FakePlanner)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", run_local_pytest)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "Login endpoint returns 500 when email is missing.",
+                "apply_changes": True,
+                "run_tests": True,
+                "workspace_path": str(root),
+            }
+        )
+
+        updated_source = app_file.read_text(encoding="utf-8")
+        assert "payload.get(\"email\")" in updated_source
+        assert "email is required" in updated_source
+        assert result["modified_files"] == ["app.py"]
+        assert result["run_summary"]["status"] == "ready_for_review"
+        assert result["run_summary"]["tests_passed"] is True
     finally:
         _remove_workspace_dir(root)

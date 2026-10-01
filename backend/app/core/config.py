@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     llm_provider: str = "mock"
     llm_model: str = "repopilot-mock-v0"
+    gemini_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GEMINI_API_KEY", "REPOPILOT_GEMINI_API_KEY"),
+    )
     github_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("GITHUB_TOKEN", "REPOPILOT_GITHUB_TOKEN"),
