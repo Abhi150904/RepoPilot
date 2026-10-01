@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 4.6**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, decide whether a repair pass is appropriate, perform a bounded repair retry, pass failure context into repair attempts, and produce a final run summary.
+This repository currently implements **Pre-Phase 5**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, load full target-file contents, produce validated structured code changes, optionally apply those changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, decide whether a repair pass is appropriate, perform a bounded repair retry, pass failure context into repair attempts, and produce a final run summary.
 
 ## Version 0 Workflow
 
@@ -167,6 +167,18 @@ workflow result
 
 Every workflow path now ends with a compact final verdict such as `planned_only`, `changes_proposed`, `ready_for_review`, `repair_failed`, or `needs_human`. This gives CLI users and future API/UI layers one stable object to inspect before digging into intermediate state.
 
+## Pre-Phase 5 Real Code Generation
+
+```text
+retrieved files
+  -> full target-file loading
+  -> structured code generation
+  -> validation
+  -> deterministic application
+```
+
+RepoPilot now separates retrieval previews from editable source. Retrieval selects likely target files, then the workflow loads complete file contents from the explicit workspace or GitHub before calling the code writer. The writer uses the LLM abstraction to return structured `FileChange` objects, while RepoPilot validates paths, actions, and content before applying changes and rendering diffs.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -298,6 +310,8 @@ pytest
 - **Repair attempts are bounded** so automated retry behavior is explicit and cannot loop forever.
 - **Repair context is structured** so future model-backed repair can use failure details without scraping raw test output.
 - **Run summaries are final workflow outputs** so users can read one verdict before inspecting detailed agent state.
+- **Full-file source is separate from retrieval context** so generated edits are based on complete editable files, not truncated previews.
+- **Structured code changes are validated before application** so unsafe paths, empty content, and unrelated files fail cleanly.
 
 ## Not Implemented Yet
 

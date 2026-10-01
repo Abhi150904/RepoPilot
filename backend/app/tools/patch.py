@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from app.schemas.code_change import ChangeApplicationResult, CodeChangeSet, FileChange
 from app.tools.filesystem import WorkspaceFileSystem
 from app.tools.git import render_change_set_diff
@@ -45,8 +47,19 @@ def _read_originals(
 
 
 def _validate_action(change: FileChange, filesystem: WorkspaceFileSystem) -> None:
+    _validate_safe_path(change.path)
+    if change.proposed_content is None or not change.proposed_content.strip():
+        raise PatchApplicationError(f"Cannot apply empty content for file: {change.path}")
+
     exists = filesystem.file_exists(change.path)
     if change.action == "modify" and not exists:
         raise PatchApplicationError(f"Cannot modify missing file: {change.path}")
     if change.action == "create" and exists:
         raise PatchApplicationError(f"Cannot create existing file: {change.path}")
+
+
+def _validate_safe_path(path: str) -> None:
+    normalized = path.replace("\\", "/")
+    pure_path = PurePosixPath(normalized)
+    if pure_path.is_absolute() or ".." in pure_path.parts:
+        raise PatchApplicationError(f"Unsafe change path: {path}")

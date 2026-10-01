@@ -13,6 +13,7 @@ class AgentState(TypedDict, total=False):
     analysis: dict[str, object]
     repository_context: dict[str, object]
     plan: dict[str, object]
+    target_files: list[dict[str, object]]
     code_changes: dict[str, object]
     diff: str
     apply_changes: bool

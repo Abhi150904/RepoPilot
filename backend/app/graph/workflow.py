@@ -11,7 +11,7 @@ from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
-from app.schemas.code_change import CodeChangeSet
+from app.schemas.code_change import CodeChangeSet, SourceFile
 from app.schemas.execution import RepairContext, RepairDecision, TestAnalysis, TestResult
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
@@ -110,18 +110,53 @@ def repo_explorer_node(state: AgentState) -> AgentState:
     return {"repository_context": context.model_dump()}
 
 
-def code_writer_node(state: AgentState) -> AgentState:
-    issue = state["issue"]
+def load_target_files_node(state: AgentState) -> AgentState:
     plan = ImplementationPlan.model_validate(state["plan"])
     repository_context = None
     if "repository_context" in state:
         repository_context = RepositoryContext.model_validate(state["repository_context"])
+
+    target_paths = _select_target_paths(plan=plan, repository_context=repository_context)
+    source_files: list[SourceFile] = []
+    workspace_path = state.get("workspace_path")
+    if workspace_path:
+        filesystem = WorkspaceFileSystem(root=workspace_path)
+        for path in target_paths:
+            if filesystem.file_exists(path):
+                source_files.append(
+                    SourceFile(path=path, content=filesystem.read_text(path), exists=True)
+                )
+    elif "repository" in state:
+        github = GitHubClient()
+        for path in target_paths:
+            try:
+                content = github.read_file(state["repository"], path)
+            except Exception:
+                continue
+            source_files.append(SourceFile(path=path, content=content, exists=True))
+
+    return {"target_files": [file.model_dump() for file in source_files]}
+
+
+def code_writer_node(state: AgentState) -> AgentState:
+    issue = state["issue"]
+    analysis = IssueAnalysis.model_validate(state["analysis"])
+    plan = ImplementationPlan.model_validate(state["plan"])
+    repository_context = None
+    if "repository_context" in state:
+        repository_context = RepositoryContext.model_validate(state["repository_context"])
+    target_files = [
+        SourceFile.model_validate(file)
+        for file in state.get("target_files", [])
+    ]
     repair_context = None
     if "repair_context" in state:
         repair_context = RepairContext.model_validate(state["repair_context"])
-    change_set = CodeWriter().propose_changes(
+    change_set = CodeWriter(llm=get_llm("coder")).propose_changes(
         issue=issue,
+        analysis=analysis,
         plan=plan,
+        target_files=target_files,
         repository_context=repository_context,
         repair_context=repair_context,
     )
@@ -193,12 +228,34 @@ def summarize_run_node(state: AgentState) -> AgentState:
     return {"run_summary": summary.model_dump()}
 
 
+def _select_target_paths(
+    plan: ImplementationPlan,
+    repository_context: RepositoryContext | None,
+    limit: int = 3,
+) -> list[str]:
+    paths: list[str] = []
+    if repository_context:
+        paths.extend(file.path for file in repository_context.matched_files)
+    paths.extend(path for path in plan.files_to_inspect if "/" in path or "." in path)
+
+    seen: set[str] = set()
+    selected: list[str] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            selected.append(path)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
     graph.add_node("issue_analyzer", issue_analyzer_node)
     graph.add_node("repo_explorer", repo_explorer_node)
     graph.add_node("planner", planner_node)
+    graph.add_node("load_target_files", load_target_files_node)
     graph.add_node("code_writer", code_writer_node)
     graph.add_node("apply_code_changes", apply_code_changes_node)
     graph.add_node("run_tests", run_tests_node)
@@ -225,7 +282,8 @@ def build_workflow():
         },
     )
     graph.add_edge("repo_explorer", "planner")
-    graph.add_edge("planner", "code_writer")
+    graph.add_edge("planner", "load_target_files")
+    graph.add_edge("load_target_files", "code_writer")
     graph.add_conditional_edges(
         "code_writer",
         after_code_writer_route,
@@ -253,7 +311,7 @@ def build_workflow():
             "end": "summarize_run",
         },
     )
-    graph.add_edge("prepare_repair", "code_writer")
+    graph.add_edge("prepare_repair", "load_target_files")
     graph.add_edge("summarize_run", END)
 
     return graph.compile()
