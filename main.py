@@ -135,6 +135,11 @@ def main() -> None:
         print("Repair Decision:")
         print(json.dumps(result["repair_decision"], indent=2))
 
+    if "repair_context" in result:
+        print()
+        print("Repair Context:")
+        print(json.dumps(result["repair_context"], indent=2))
+
     if "repair_attempts" in result:
         print()
         print("Repair Attempts:")

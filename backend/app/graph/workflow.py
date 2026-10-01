@@ -11,7 +11,7 @@ from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet
-from app.schemas.execution import RepairDecision, TestAnalysis, TestResult
+from app.schemas.execution import RepairContext, RepairDecision, TestAnalysis, TestResult
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
@@ -115,10 +115,14 @@ def code_writer_node(state: AgentState) -> AgentState:
     repository_context = None
     if "repository_context" in state:
         repository_context = RepositoryContext.model_validate(state["repository_context"])
+    repair_context = None
+    if "repair_context" in state:
+        repair_context = RepairContext.model_validate(state["repair_context"])
     change_set = CodeWriter().propose_changes(
         issue=issue,
         plan=plan,
         repository_context=repository_context,
+        repair_context=repair_context,
     )
     return {
         "code_changes": change_set.model_dump(),
@@ -168,7 +172,19 @@ def decide_repair_node(state: AgentState) -> AgentState:
 
 
 def prepare_repair_node(state: AgentState) -> AgentState:
-    return {"repair_attempts": state.get("repair_attempts", 0) + 1}
+    attempt = state.get("repair_attempts", 0) + 1
+    analysis = TestAnalysis.model_validate(state["test_analysis"])
+    context = RepairContext(
+        attempt=attempt,
+        test_status=analysis.status,
+        test_summary=analysis.summary,
+        failure_reason=analysis.failure_reason,
+        previous_diff=state.get("diff", ""),
+    )
+    return {
+        "repair_attempts": attempt,
+        "repair_context": context.model_dump(),
+    }
 
 
 def build_workflow():

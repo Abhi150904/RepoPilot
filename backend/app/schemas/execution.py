@@ -26,3 +26,11 @@ class RepairDecision(BaseModel):
     should_retry: bool
     next_action: Literal["ready_for_review", "repair", "rerun_tests", "stop"]
     reason: str
+
+
+class RepairContext(BaseModel):
+    attempt: int
+    test_status: Literal["failed", "timed_out", "error"]
+    test_summary: str
+    failure_reason: str | None = None
+    previous_diff: str = ""

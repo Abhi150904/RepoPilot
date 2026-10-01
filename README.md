@@ -2,7 +2,7 @@
 
 RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
 
-This repository currently implements **Version 4.4**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, decide whether a repair pass is appropriate, and perform a bounded repair retry.
+This repository currently implements **Version 4.5**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, produce a controlled code-change proposal, optionally apply structured changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, decide whether a repair pass is appropriate, perform a bounded repair retry, and pass failure context into repair attempts.
 
 ## Version 0 Workflow
 
@@ -147,6 +147,16 @@ decide_repair
 
 The workflow can now perform a bounded automated repair retry when tests fail with useful failure output. Repair attempts are counted in graph state and limited by `max_repair_attempts`, which defaults to one.
 
+## Version 4.5 Repair Context Injection
+
+```text
+prepare_repair
+  -> repair context
+  -> code_writer
+```
+
+Repair retries now receive structured context from the failed test run, including the attempt number, test status, summary, failure reason, and previous diff. The controlled code writer includes that context in the repair patch proposal so retries are guided by the failure instead of being blind repeats.
+
 The CLI uses a hard-coded issue:
 
 ```text
@@ -275,6 +285,7 @@ pytest
 - **Applying changes is opt-in** and requires an explicit workspace path, so normal GitHub issue runs do not write files.
 - **Sandbox testing is opt-in** and runs explicit command tokens in a restricted Docker container instead of passing user input through a shell.
 - **Repair attempts are bounded** so automated retry behavior is explicit and cannot loop forever.
+- **Repair context is structured** so future model-backed repair can use failure details without scraping raw test output.
 
 ## Not Implemented Yet
 

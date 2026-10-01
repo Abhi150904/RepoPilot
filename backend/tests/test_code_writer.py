@@ -8,6 +8,7 @@ import pytest
 
 from app.agents.coder import CodeWriter
 from app.schemas.code_change import CodeChangeSet, FileChange
+from app.schemas.execution import RepairContext
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext, RetrievedFile
 from app.tools.filesystem import WorkspaceFileSystem, WorkspacePathError
@@ -75,6 +76,32 @@ def test_code_writer_uses_retrieved_files_for_patch_proposal() -> None:
     assert "Validate destination input" in change_set.diff
     assert "const extractDestination" in change_set.diff
     assert "// RepoPilot patch proposal" in change_set.diff
+
+
+def test_code_writer_includes_repair_context_in_patch_proposal() -> None:
+    plan = ImplementationPlan(
+        summary="Validate login input.",
+        steps=["Add email validation."],
+        files_to_inspect=["src/routes/login.py"],
+        tests_required=["missing email returns validation error"],
+    )
+    repair_context = RepairContext(
+        attempt=1,
+        test_status="failed",
+        test_summary="The sandbox test command failed with 1 failing test(s).",
+        failure_reason="FAILED tests/test_login.py::test_missing_email",
+        previous_diff="-old\n+new\n",
+    )
+
+    change_set = CodeWriter().propose_changes(
+        issue="Login endpoint returns 500 when email is missing",
+        plan=plan,
+        repair_context=repair_context,
+    )
+
+    assert "Repair context" in change_set.diff
+    assert "Attempt: 1" in change_set.diff
+    assert "FAILED tests/test_login.py::test_missing_email" in change_set.diff
 
 
 def test_workspace_file_system_writes_inside_root() -> None:

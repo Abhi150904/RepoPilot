@@ -105,7 +105,7 @@ def test_workflow_applies_code_changes_only_when_explicitly_enabled(monkeypatch)
     target_file.write_text("old value\n", encoding="utf-8")
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None):
+        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
             return CodeChangeSet(
                 summary="Update example",
                 changes=[
@@ -142,7 +142,7 @@ def test_workflow_applies_code_changes_only_when_explicitly_enabled(monkeypatch)
 
 def test_workflow_requires_workspace_path_when_applying_changes(monkeypatch) -> None:
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None):
+        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
             return CodeChangeSet(
                 summary="Noop",
                 changes=[],
@@ -210,7 +210,7 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
     events = []
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None):
+        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
             return CodeChangeSet(
                 summary="Update example",
                 changes=[
@@ -306,8 +306,8 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
     test_calls = []
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None):
-            code_writer_calls.append(issue)
+        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
+            code_writer_calls.append(repair_context)
             content = f"new value {len(code_writer_calls)}\n"
             return CodeChangeSet(
                 summary="Update example",
@@ -357,8 +357,15 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
         )
 
         assert len(code_writer_calls) == 2
+        assert code_writer_calls[0] is None
+        assert code_writer_calls[1].attempt == 1
+        assert code_writer_calls[1].test_status == "failed"
+        assert code_writer_calls[1].failure_reason == "FAILED tests/test_example.py::test_example"
+        assert "-old value" in code_writer_calls[1].previous_diff
         assert test_calls == ["new value 1\n", "new value 2\n"]
         assert result["repair_attempts"] == 1
+        assert result["repair_context"]["attempt"] == 1
+        assert result["repair_context"]["failure_reason"] == "FAILED tests/test_example.py::test_example"
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
         assert target_file.read_text(encoding="utf-8") == "new value 2\n"
@@ -374,7 +381,7 @@ def test_workflow_stops_when_repair_attempts_are_exhausted(monkeypatch) -> None:
     code_writer_calls = []
 
     class FakeCodeWriter:
-        def propose_changes(self, issue, plan, repository_context=None):
+        def propose_changes(self, issue, plan, repository_context=None, repair_context=None):
             code_writer_calls.append(issue)
             return CodeChangeSet(
                 summary="Update example",
