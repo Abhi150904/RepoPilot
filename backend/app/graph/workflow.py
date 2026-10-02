@@ -7,6 +7,7 @@ from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
 from app.agents.repair_decider import RepairDecider
 from app.agents.repo_explorer import RepoExplorer
+from app.agents.reviewer import Reviewer
 from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
@@ -50,6 +51,7 @@ def after_apply_changes_route(state: AgentState) -> str:
 
 def after_repair_decision_route(state: AgentState) -> str:
     decision = RepairDecision.model_validate(state["repair_decision"])
+    analysis = TestAnalysis.model_validate(state["test_analysis"])
     repair_attempts = state.get("repair_attempts", 0)
     max_repair_attempts = state.get("max_repair_attempts", 1)
 
@@ -59,6 +61,8 @@ def after_repair_decision_route(state: AgentState) -> str:
         and repair_attempts < max_repair_attempts
     ):
         return "prepare_repair"
+    if analysis.status == "passed":
+        return "review_changes"
     return "end"
 
 
@@ -223,6 +227,21 @@ def prepare_repair_node(state: AgentState) -> AgentState:
     }
 
 
+def review_changes_node(state: AgentState) -> AgentState:
+    plan = ImplementationPlan.model_validate(state["plan"])
+    change_set = CodeChangeSet.model_validate(state["code_changes"])
+    test_analysis = TestAnalysis.model_validate(state["test_analysis"])
+    result = Reviewer().review(
+        issue=state["issue"],
+        plan=plan,
+        change_set=change_set,
+        diff=state.get("diff", ""),
+        test_analysis=test_analysis,
+        repair_attempts=state.get("repair_attempts", 0),
+    )
+    return {"review_result": result.model_dump()}
+
+
 def summarize_run_node(state: AgentState) -> AgentState:
     summary = RunSummarizer().summarize(dict(state))
     return {"run_summary": summary.model_dump()}
@@ -262,6 +281,7 @@ def build_workflow():
     graph.add_node("analyze_tests", analyze_tests_node)
     graph.add_node("decide_repair", decide_repair_node)
     graph.add_node("prepare_repair", prepare_repair_node)
+    graph.add_node("review_changes", review_changes_node)
     graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
@@ -308,10 +328,12 @@ def build_workflow():
         after_repair_decision_route,
         {
             "prepare_repair": "prepare_repair",
+            "review_changes": "review_changes",
             "end": "summarize_run",
         },
     )
     graph.add_edge("prepare_repair", "load_target_files")
+    graph.add_edge("review_changes", "summarize_run")
     graph.add_edge("summarize_run", END)
 
     return graph.compile()

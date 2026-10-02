@@ -27,4 +27,5 @@ class AgentState(TypedDict, total=False):
     repair_attempts: int
     max_repair_attempts: int
     repair_context: dict[str, object]
+    review_result: dict[str, object]
     run_summary: dict[str, object]

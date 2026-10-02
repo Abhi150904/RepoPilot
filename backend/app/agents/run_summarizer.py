@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.schemas.execution import RepairDecision, RunSummary, TestAnalysis
+from app.schemas.execution import RepairDecision, ReviewResult, RunSummary, TestAnalysis
 
 
 class RunSummarizer:
@@ -43,6 +43,23 @@ def _summarize_tested_run(
     analysis = TestAnalysis.model_validate(state["test_analysis"])
 
     if analysis.status == "passed":
+        if "review_result" in state:
+            review = ReviewResult.model_validate(state["review_result"])
+            if review.approved:
+                return RunSummary(
+                    status="awaiting_approval",
+                    summary="Tests passed and automated review approved the patch.",
+                    tests_passed=True,
+                    repair_attempts=repair_attempts,
+                    next_action="human_review",
+                )
+            return RunSummary(
+                status="review_failed",
+                summary="Tests passed, but automated review found issues to address.",
+                tests_passed=True,
+                repair_attempts=repair_attempts,
+                next_action="inspect_failure",
+            )
         return RunSummary(
             status="ready_for_review",
             summary=_passed_summary(repair_attempts),

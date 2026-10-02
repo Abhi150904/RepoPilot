@@ -36,12 +36,35 @@ class RepairContext(BaseModel):
     previous_diff: str = ""
 
 
+class ReviewFinding(BaseModel):
+    severity: Literal["info", "warning", "error"]
+    category: Literal[
+        "correctness",
+        "edge_cases",
+        "error_handling",
+        "security",
+        "maintainability",
+        "test_coverage",
+    ]
+    message: str
+    path: str | None = None
+
+
+class ReviewResult(BaseModel):
+    approved: bool
+    summary: str
+    findings: list[ReviewFinding] = Field(default_factory=list)
+    next_action: Literal["await_human_approval", "repair", "needs_human"]
+
+
 class RunSummary(BaseModel):
     status: Literal[
         "planned_only",
         "changes_proposed",
         "changes_applied",
         "ready_for_review",
+        "awaiting_approval",
+        "review_failed",
         "repair_needed",
         "repair_failed",
         "needs_human",

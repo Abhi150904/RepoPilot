@@ -140,6 +140,11 @@ def main() -> None:
         print("Repair Context:")
         print(json.dumps(result["repair_context"], indent=2))
 
+    if "review_result" in result:
+        print()
+        print("Review Result:")
+        print(json.dumps(result["review_result"], indent=2))
+
     if "repair_attempts" in result:
         print()
         print("Repair Attempts:")

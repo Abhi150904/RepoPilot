@@ -39,6 +39,58 @@ def test_run_summarizer_marks_tests_passed_after_repair() -> None:
     assert "after 1 repair" in summary.summary
 
 
+def test_run_summarizer_marks_approved_review_as_awaiting_approval() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "test_analysis": {
+                "status": "passed",
+                "summary": "The sandbox test command passed 1 test(s).",
+                "failure_reason": None,
+                "next_action": "ready_for_review",
+            },
+            "review_result": {
+                "approved": True,
+                "summary": "Automated review approved the tested patch.",
+                "findings": [],
+                "next_action": "await_human_approval",
+            },
+        }
+    )
+
+    assert summary.status == "awaiting_approval"
+    assert summary.tests_passed is True
+    assert summary.next_action == "human_review"
+
+
+def test_run_summarizer_marks_rejected_review_as_review_failed() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "test_analysis": {
+                "status": "passed",
+                "summary": "The sandbox test command passed 1 test(s).",
+                "failure_reason": None,
+                "next_action": "ready_for_review",
+            },
+            "review_result": {
+                "approved": False,
+                "summary": "Automated review found issues.",
+                "findings": [
+                    {
+                        "severity": "error",
+                        "category": "correctness",
+                        "message": "No source changes were proposed.",
+                        "path": None,
+                    }
+                ],
+                "next_action": "repair",
+            },
+        }
+    )
+
+    assert summary.status == "review_failed"
+    assert summary.next_action == "inspect_failure"
+
+
 def test_run_summarizer_marks_repair_failed() -> None:
     summary = RunSummarizer().summarize(
         {
