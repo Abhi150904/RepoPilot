@@ -229,7 +229,8 @@ def test_workflow_runs_tests_when_explicitly_enabled(monkeypatch) -> None:
     assert result["test_analysis"]["next_action"] == "ready_for_review"
     assert result["repair_decision"]["should_retry"] is False
     assert result["repair_decision"]["next_action"] == "ready_for_review"
-    assert result["run_summary"]["status"] == "ready_for_review"
+    assert result["review_result"]["approved"] is False
+    assert result["run_summary"]["status"] == "review_failed"
     assert result["run_summary"]["tests_passed"] is True
 
 
@@ -289,6 +290,8 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
         assert result["test_result"]["passed"] == 1
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
+        assert result["review_result"]["approved"] is True
+        assert result["run_summary"]["status"] == "awaiting_approval"
         assert events == [("test", "new value\n")]
     finally:
         _remove_workspace_dir(root)
@@ -409,7 +412,8 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
         assert result["repair_context"]["failure_reason"] == "FAILED tests/test_example.py::test_example"
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
-        assert result["run_summary"]["status"] == "ready_for_review"
+        assert result["review_result"]["approved"] is True
+        assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["repair_attempts"] == 1
         assert target_file.read_text(encoding="utf-8") == "new value 2\n"
     finally:
@@ -606,7 +610,8 @@ def test_workflow_fixes_broken_python_fixture_end_to_end(monkeypatch) -> None:
         assert "payload.get(\"email\")" in updated_source
         assert "email is required" in updated_source
         assert result["modified_files"] == ["app.py"]
-        assert result["run_summary"]["status"] == "ready_for_review"
+        assert result["review_result"]["approved"] is True
+        assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["tests_passed"] is True
     finally:
         _remove_workspace_dir(root)
