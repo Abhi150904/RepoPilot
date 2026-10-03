@@ -94,15 +94,18 @@ class PublicationPackage(BaseModel):
 
 
 class PublishResult(BaseModel):
-    mode: Literal["dry_run"]
-    status: Literal["ready", "blocked"]
+    mode: Literal["dry_run", "local"]
+    status: Literal["ready", "blocked", "published"]
     summary: str
     commands: list[str] = Field(default_factory=list)
+    executed_commands: list[str] = Field(default_factory=list)
     pr_title: str
     pr_body: str
     pr_url: str | None = None
+    commit_sha: str | None = None
+    branch_name: str | None = None
     blockers: list[str] = Field(default_factory=list)
-    next_action: Literal["run_publication_commands", "inspect_failure"]
+    next_action: Literal["run_publication_commands", "push_branch", "inspect_failure"]
 
 
 class RunSummary(BaseModel):

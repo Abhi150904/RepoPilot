@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate the publication package without running git or GitHub commands.",
     )
+    parser.add_argument(
+        "--publish-local",
+        action="store_true",
+        help="Create the publication branch and local commit without pushing or opening a PR.",
+    )
     return parser.parse_args()
 
 
@@ -94,6 +99,14 @@ def main() -> None:
         if not args.approve:
             raise SystemExit("--publish-dry-run requires --approve.")
         initial_state["publish_dry_run"] = True
+    if args.publish_local:
+        if not args.approve:
+            raise SystemExit("--publish-local requires --approve.")
+        if args.publish_dry_run:
+            raise SystemExit("--publish-local cannot be combined with --publish-dry-run.")
+        if not args.workspace:
+            raise SystemExit("--publish-local requires --workspace.")
+        initial_state["publish_local"] = True
 
     try:
         result = workflow.invoke(initial_state)

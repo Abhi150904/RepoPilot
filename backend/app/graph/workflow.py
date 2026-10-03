@@ -86,6 +86,8 @@ def after_approval_gate_route(state: AgentState) -> str:
 
 
 def after_prepare_publication_route(state: AgentState) -> str:
+    if state.get("publish_local"):
+        return "publish_local"
     if state.get("publish_dry_run"):
         return "publish_dry_run"
     return "end"
@@ -302,6 +304,12 @@ def publish_dry_run_node(state: AgentState) -> AgentState:
     return {"publish_result": result.model_dump()}
 
 
+def publish_local_node(state: AgentState) -> AgentState:
+    package = PublicationPackage.model_validate(state["publication_package"])
+    result = PublishExecutor(workspace_path=state.get("workspace_path")).publish_local(package)
+    return {"publish_result": result.model_dump()}
+
+
 def summarize_run_node(state: AgentState) -> AgentState:
     summary = RunSummarizer().summarize(dict(state))
     return {"run_summary": summary.model_dump()}
@@ -345,6 +353,7 @@ def build_workflow():
     graph.add_node("approval_gate", approval_gate_node)
     graph.add_node("prepare_publication", prepare_publication_node)
     graph.add_node("publish_dry_run", publish_dry_run_node)
+    graph.add_node("publish_local", publish_local_node)
     graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
@@ -409,10 +418,12 @@ def build_workflow():
         "prepare_publication",
         after_prepare_publication_route,
         {
+            "publish_local": "publish_local",
             "publish_dry_run": "publish_dry_run",
             "end": "summarize_run",
         },
     )
+    graph.add_edge("publish_local", "summarize_run")
     graph.add_edge("publish_dry_run", "summarize_run")
     graph.add_edge("summarize_run", END)
 

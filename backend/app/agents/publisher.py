@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+
 from app.schemas.execution import PublicationPackage, PublishResult
 
 
 class PublishExecutor:
     """Validates publication readiness without performing side effects."""
+
+    def __init__(self, workspace_path: str | None = None):
+        self.workspace_path = workspace_path
 
     def dry_run(self, package: PublicationPackage) -> PublishResult:
         blockers = _blockers(package)
@@ -17,6 +23,7 @@ class PublishExecutor:
                 pr_title=package.pr_title,
                 pr_body=package.pr_body,
                 pr_url=package.pr_url,
+                branch_name=package.branch_name,
                 blockers=blockers,
                 next_action="inspect_failure",
             )
@@ -29,8 +36,69 @@ class PublishExecutor:
             pr_title=package.pr_title,
             pr_body=package.pr_body,
             pr_url=package.pr_url,
+            branch_name=package.branch_name,
             blockers=[],
             next_action="run_publication_commands",
+        )
+
+    def publish_local(self, package: PublicationPackage) -> PublishResult:
+        blockers = _blockers(package)
+        if self.workspace_path is None:
+            blockers.append("Workspace path is required for local publication.")
+        if blockers:
+            return PublishResult(
+                mode="local",
+                status="blocked",
+                summary="Local publication found blockers to inspect before publishing.",
+                commands=package.commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url=package.pr_url,
+                branch_name=package.branch_name,
+                blockers=blockers,
+                next_action="inspect_failure",
+            )
+
+        root = Path(self.workspace_path)
+        executed: list[str] = []
+        steps = [
+            (["git", "checkout", "-b", package.branch_name], f"git checkout -b {package.branch_name}"),
+            (["git", "add", *package.changed_files], f"git add {' '.join(package.changed_files)}"),
+            (["git", "commit", "-m", package.commit_message], f"git commit -m {package.commit_message}"),
+        ]
+        for args, display in steps:
+            completed = _run(args=args, root=root)
+            if completed.returncode != 0:
+                return PublishResult(
+                    mode="local",
+                    status="blocked",
+                    summary=f"Local publication failed while running: {display}",
+                    commands=package.commands,
+                    executed_commands=executed,
+                    pr_title=package.pr_title,
+                    pr_body=package.pr_body,
+                    pr_url=package.pr_url,
+                    branch_name=package.branch_name,
+                    blockers=[completed.stderr.strip() or completed.stdout.strip() or "Git command failed."],
+                    next_action="inspect_failure",
+                )
+            executed.append(display)
+
+        sha = _run(args=["git", "rev-parse", "HEAD"], root=root)
+        commit_sha = sha.stdout.strip() if sha.returncode == 0 else None
+        return PublishResult(
+            mode="local",
+            status="published",
+            summary="Local publication completed. Branch and commit were created locally.",
+            commands=package.commands,
+            executed_commands=executed,
+            pr_title=package.pr_title,
+            pr_body=package.pr_body,
+            pr_url=package.pr_url,
+            commit_sha=commit_sha,
+            branch_name=package.branch_name,
+            blockers=[],
+            next_action="push_branch",
         )
 
 
@@ -50,3 +118,13 @@ def _blockers(package: PublicationPackage) -> list[str]:
         blockers.extend(safety.warnings)
 
     return blockers
+
+
+def _run(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
