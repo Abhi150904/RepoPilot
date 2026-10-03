@@ -376,6 +376,12 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert result["publication_package"]["commit_message"] == "cli writes old value"
         assert result["publication_package"]["pr_title"] == "CLI writes old value"
         assert result["publication_package"]["changed_files"] == ["src/example.py"]
+        assert result["publication_package"]["commands"] == [
+            'git checkout -b "cli-writes-old-value"',
+            'git add "src/example.py"',
+            'git commit -m "cli writes old value"',
+            'git push -u origin "cli-writes-old-value"',
+        ]
         assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
         assert result["run_summary"]["status"] == "approved"

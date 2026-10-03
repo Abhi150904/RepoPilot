@@ -85,6 +85,7 @@ class PublicationPackage(BaseModel):
     pr_title: str
     pr_body: str
     changed_files: list[str] = Field(default_factory=list)
+    commands: list[str] = Field(default_factory=list)
     git_safety: GitSafetyReport | None = None
     next_action: Literal["create_pull_request"]
 

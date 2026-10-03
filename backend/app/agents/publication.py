@@ -30,6 +30,11 @@ class PublicationPreparer:
             changed_files=changed_files,
             issue_number=issue_number,
         )
+        commands = _commands(
+            branch_name=branch_name,
+            changed_files=changed_files,
+            commit_message=commit_message,
+        )
 
         return PublicationPackage(
             status="ready_to_publish",
@@ -38,6 +43,7 @@ class PublicationPreparer:
             pr_title=pr_title,
             pr_body=pr_body,
             changed_files=changed_files,
+            commands=commands,
             git_safety=git_safety,
             next_action="create_pull_request",
         )
@@ -103,3 +109,29 @@ def _pr_body(
         ]
     )
     return "\n".join(lines)
+
+
+def _commands(
+    *,
+    branch_name: str,
+    changed_files: list[str],
+    commit_message: str,
+) -> list[str]:
+    commands = [f"git checkout -b {_quote(branch_name)}"]
+    if changed_files:
+        files = " ".join(_quote(path) for path in changed_files)
+        commands.append(f"git add {files}")
+    else:
+        commands.append("# No changed files were recorded; inspect git status before committing.")
+    commands.extend(
+        [
+            f"git commit -m {_quote(commit_message)}",
+            f"git push -u origin {_quote(branch_name)}",
+        ]
+    )
+    return commands
+
+
+def _quote(value: str) -> str:
+    escaped = value.replace('"', '\\"')
+    return f'"{escaped}"'
