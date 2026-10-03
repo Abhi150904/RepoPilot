@@ -28,4 +28,7 @@ class AgentState(TypedDict, total=False):
     max_repair_attempts: int
     repair_context: dict[str, object]
     review_result: dict[str, object]
+    approved: bool
+    approval_decision: dict[str, object]
+    publication_package: dict[str, object]
     run_summary: dict[str, object]

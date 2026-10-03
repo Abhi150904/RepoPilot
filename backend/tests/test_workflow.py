@@ -10,7 +10,7 @@ import pytest
 from app.core.llm import MockLLMProvider
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
-from app.schemas.execution import TestResult as ExecutionResult
+from app.schemas.execution import GitSafetyReport, TestResult as ExecutionResult
 from app.schemas.issue import GitHubIssue
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryFile
@@ -291,8 +291,104 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
         assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["status"] == "awaiting_approval"
+        assert result["approval_decision"]["next_action"] == "human_review"
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert events == [("test", "new value\n")]
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
+    monkeypatch,
+) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+
+    class FakeCodeWriter:
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self,
+            issue,
+            analysis=None,
+            plan=None,
+            target_files=None,
+            repository_context=None,
+            repair_context=None,
+        ):
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content="new value\n",
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    monkeypatch.setattr(
+        workflow_module,
+        "inspect_git_safety",
+        lambda workspace_path, expected_changed_files: GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+            current_branch="07-human-approval-pr",
+            warnings=[],
+        ),
+    )
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "approved": True,
+                "workspace_path": str(root),
+            }
+        )
+
+        assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["approved"] is True
+        assert result["approval_decision"]["status"] == "approved"
+        assert result["publication_package"]["status"] == "ready_to_publish"
+        assert result["publication_package"]["branch_name"] == "cli-writes-old-value"
+        assert result["publication_package"]["commit_message"] == "cli writes old value"
+        assert result["publication_package"]["pr_title"] == "CLI writes old value"
+        assert result["publication_package"]["changed_files"] == ["src/example.py"]
+        assert result["publication_package"]["commands"] == [
+            'git checkout -b "cli-writes-old-value"',
+            'git add "src/example.py"',
+            'git commit -m "cli writes old value"',
+            'git push -u origin "cli-writes-old-value"',
+        ]
+        assert result["publication_package"]["pr_url"] is None
+        assert result["publication_package"]["pr_command"].startswith("gh pr create")
+        assert "GitHub repository page" in result["publication_package"]["pr_instructions"][2]
+        assert result["publication_package"]["git_safety"]["status"] == "safe"
+        assert result["publication_package"]["next_action"] == "create_pull_request"
+        assert result["run_summary"]["status"] == "approved"
+        assert result["run_summary"]["next_action"] == "commit_changes"
     finally:
         _remove_workspace_dir(root)
 
@@ -413,6 +509,7 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
         assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["status"] == "awaiting_approval"
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["repair_attempts"] == 1
         assert target_file.read_text(encoding="utf-8") == "new value 2\n"
@@ -611,6 +708,7 @@ def test_workflow_fixes_broken_python_fixture_end_to_end(monkeypatch) -> None:
         assert "email is required" in updated_source
         assert result["modified_files"] == ["app.py"]
         assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["status"] == "awaiting_approval"
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["tests_passed"] is True
     finally:

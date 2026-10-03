@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Maximum automated repair retries after test failures.",
     )
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="Mark the reviewed patch as explicitly approved for later publication steps.",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +83,8 @@ def main() -> None:
         if not args.run_tests:
             raise SystemExit("--test-command can only be used with --run-tests.")
         initial_state["test_command"] = args.test_command
+    if args.approve:
+        initial_state["approved"] = True
 
     try:
         result = workflow.invoke(initial_state)
@@ -145,6 +152,17 @@ def main() -> None:
         print("Review Result:")
         print(json.dumps(result["review_result"], indent=2))
 
+    if "approval_decision" in result:
+        print()
+        print("Approval Decision:")
+        print(json.dumps(result["approval_decision"], indent=2))
+
+    if "publication_package" in result:
+        print()
+        print("Publication Package:")
+        print(json.dumps(result["publication_package"], indent=2))
+        _print_publication_summary(result["publication_package"])
+
     if "repair_attempts" in result:
         print()
         print("Repair Attempts:")
@@ -154,6 +172,41 @@ def main() -> None:
         print()
         print("Run Summary:")
         print(json.dumps(result["run_summary"], indent=2))
+
+
+def _print_publication_summary(package: dict[str, object]) -> None:
+    print()
+    print("Publication Commands:")
+    for command in package.get("commands", []):
+        print(command)
+
+    print()
+    print("Pull Request:")
+    print(f"Title: {package['pr_title']}")
+    print("Body:")
+    print(package["pr_body"])
+
+    if package.get("pr_url"):
+        print()
+        print("PR URL:")
+        print(package["pr_url"])
+
+    if package.get("pr_command"):
+        print()
+        print("GitHub CLI Command:")
+        print(package["pr_command"])
+
+    git_safety = package.get("git_safety")
+    if isinstance(git_safety, dict):
+        print()
+        print("Git Safety:")
+        print(f"Status: {git_safety['status']}")
+        print(git_safety["summary"])
+        warnings = git_safety.get("warnings", [])
+        if warnings:
+            print("Warnings:")
+            for warning in warnings:
+                print(f"- {warning}")
 
 
 if __name__ == "__main__":

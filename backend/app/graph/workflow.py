@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.approval import ApprovalGate
 from app.agents.analyzer import IssueAnalyzer
 from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
+from app.agents.publication import PublicationPreparer
 from app.agents.repair_decider import RepairDecider
 from app.agents.repo_explorer import RepoExplorer
 from app.agents.reviewer import Reviewer
@@ -13,11 +15,19 @@ from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet, SourceFile
-from app.schemas.execution import RepairContext, RepairDecision, TestAnalysis, TestResult
+from app.schemas.execution import (
+    ApprovalDecision,
+    RepairContext,
+    RepairDecision,
+    ReviewResult,
+    TestAnalysis,
+    TestResult,
+)
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
 from app.tools.filesystem import WorkspaceFileSystem
+from app.tools.git import inspect_git_safety
 from app.tools.github import GitHubClient
 from app.tools.patch import apply_change_set
 from app.tools.sandbox import run_tests_in_docker
@@ -63,6 +73,13 @@ def after_repair_decision_route(state: AgentState) -> str:
         return "prepare_repair"
     if analysis.status == "passed":
         return "review_changes"
+    return "end"
+
+
+def after_approval_gate_route(state: AgentState) -> str:
+    decision = ApprovalDecision.model_validate(state["approval_decision"])
+    if decision.approved:
+        return "prepare_publication"
     return "end"
 
 
@@ -242,6 +259,35 @@ def review_changes_node(state: AgentState) -> AgentState:
     return {"review_result": result.model_dump()}
 
 
+def approval_gate_node(state: AgentState) -> AgentState:
+    review = ReviewResult.model_validate(state["review_result"])
+    decision = ApprovalGate().decide(
+        review=review,
+        approved=state.get("approved", False),
+    )
+    return {"approval_decision": decision.model_dump()}
+
+
+def prepare_publication_node(state: AgentState) -> AgentState:
+    approval = ApprovalDecision.model_validate(state["approval_decision"])
+    changed_files = state.get("modified_files", [])
+    git_safety = None
+    if "workspace_path" in state:
+        git_safety = inspect_git_safety(
+            workspace_path=state["workspace_path"],
+            expected_changed_files=changed_files,
+        )
+    package = PublicationPreparer().prepare(
+        issue=state["issue"],
+        approval=approval,
+        changed_files=changed_files,
+        issue_number=state.get("issue_number"),
+        repository=state.get("repository"),
+        git_safety=git_safety,
+    )
+    return {"publication_package": package.model_dump()}
+
+
 def summarize_run_node(state: AgentState) -> AgentState:
     summary = RunSummarizer().summarize(dict(state))
     return {"run_summary": summary.model_dump()}
@@ -282,6 +328,8 @@ def build_workflow():
     graph.add_node("decide_repair", decide_repair_node)
     graph.add_node("prepare_repair", prepare_repair_node)
     graph.add_node("review_changes", review_changes_node)
+    graph.add_node("approval_gate", approval_gate_node)
+    graph.add_node("prepare_publication", prepare_publication_node)
     graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
@@ -333,7 +381,16 @@ def build_workflow():
         },
     )
     graph.add_edge("prepare_repair", "load_target_files")
-    graph.add_edge("review_changes", "summarize_run")
+    graph.add_edge("review_changes", "approval_gate")
+    graph.add_conditional_edges(
+        "approval_gate",
+        after_approval_gate_route,
+        {
+            "prepare_publication": "prepare_publication",
+            "end": "summarize_run",
+        },
+    )
+    graph.add_edge("prepare_publication", "summarize_run")
     graph.add_edge("summarize_run", END)
 
     return graph.compile()
