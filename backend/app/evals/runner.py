@@ -16,6 +16,9 @@ from app.evals.models import (
 )
 from app.graph.workflow import build_workflow
 
+DEFAULT_CASE_DIR = Path("backend/tests/fixtures/evals")
+CASE_PATTERN = "*.case.json"
+
 
 def load_eval_case(path: Path) -> EvalCase:
     return EvalCase.model_validate(json.loads(path.read_text(encoding="utf-8")))
@@ -48,7 +51,8 @@ def run_eval_case(path: Path) -> EvalCaseResult:
 
 
 def run_eval_suite(paths: Iterable[Path]) -> EvalSuiteResult:
-    case_results = [run_eval_case(path) for path in paths]
+    case_paths = list(paths)
+    case_results = [run_eval_case(path) for path in case_paths]
     passed = sum(1 for result in case_results if result.status == "passed")
     failed = len(case_results) - passed
     points_earned = sum(result.points_earned for result in case_results)
@@ -63,6 +67,26 @@ def run_eval_suite(paths: Iterable[Path]) -> EvalSuiteResult:
         category_scores=_category_scores(case_results),
         cases=case_results,
     )
+
+
+def discover_eval_cases(paths: Iterable[Path]) -> list[Path]:
+    discovered: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            discovered.extend(sorted(path.rglob(CASE_PATTERN)))
+        elif path.is_file():
+            discovered.append(path)
+        else:
+            raise FileNotFoundError(f"Eval case path does not exist: {path}")
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in discovered:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(path)
+    return unique
 
 
 def evaluate_result(case: EvalCase, result: dict[str, object]) -> EvalCaseResult:
@@ -231,11 +255,28 @@ def _print_report(result: EvalSuiteResult) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run RepoPilot eval cases.")
-    parser.add_argument("cases", nargs="+", help="Path(s) to eval case JSON files.")
+    parser.add_argument(
+        "cases",
+        nargs="*",
+        help="Eval case JSON files or directories. Defaults to backend/tests/fixtures/evals.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the eval suite result as JSON.",
+    )
     args = parser.parse_args()
 
-    result = run_eval_suite(Path(case) for case in args.cases)
-    _print_report(result)
+    input_paths = [Path(case) for case in args.cases] or [DEFAULT_CASE_DIR]
+    case_paths = discover_eval_cases(input_paths)
+    if not case_paths:
+        raise SystemExit("No eval case files found.")
+
+    result = run_eval_suite(case_paths)
+    if args.json:
+        print(result.model_dump_json(indent=2))
+    else:
+        _print_report(result)
     if result.failed:
         raise SystemExit(1)
 

@@ -4,7 +4,13 @@ import json
 from pathlib import Path
 
 from app.evals.models import EvalCase
-from app.evals.runner import evaluate_result, load_eval_case, run_eval_case, run_eval_suite
+from app.evals.runner import (
+    discover_eval_cases,
+    evaluate_result,
+    load_eval_case,
+    run_eval_case,
+    run_eval_suite,
+)
 
 
 def test_load_eval_case_from_json(tmp_path) -> None:
@@ -162,6 +168,33 @@ def test_run_eval_suite_uses_workflow_input(monkeypatch, tmp_path) -> None:
         "outcome": 1.0,
         "tests": 1.0,
     }
+
+
+def test_discover_eval_cases_accepts_files_and_directories(tmp_path) -> None:
+    case_dir = tmp_path / "cases"
+    nested = case_dir / "nested"
+    nested.mkdir(parents=True)
+    first = case_dir / "first.case.json"
+    second = nested / "second.case.json"
+    ignored = case_dir / "notes.json"
+    first.write_text("{}", encoding="utf-8")
+    second.write_text("{}", encoding="utf-8")
+    ignored.write_text("{}", encoding="utf-8")
+
+    paths = discover_eval_cases([case_dir, first])
+
+    assert paths == [first, second]
+
+
+def test_discover_eval_cases_rejects_missing_path(tmp_path) -> None:
+    missing = tmp_path / "missing"
+
+    try:
+        discover_eval_cases([missing])
+    except FileNotFoundError as exc:
+        assert str(missing) in str(exc)
+    else:
+        raise AssertionError("Expected missing eval paths to be rejected.")
 
 
 def test_fixture_eval_cases_pass_with_mock_provider(monkeypatch) -> None:
