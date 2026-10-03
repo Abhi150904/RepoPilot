@@ -15,6 +15,7 @@ class PublicationPreparer:
         approval: ApprovalDecision,
         changed_files: list[str],
         issue_number: int | None = None,
+        repository: str | None = None,
         git_safety: GitSafetyReport | None = None,
     ) -> PublicationPackage:
         if not approval.approved:
@@ -35,6 +36,9 @@ class PublicationPreparer:
             changed_files=changed_files,
             commit_message=commit_message,
         )
+        pr_url = _pr_url(repository=repository, branch_name=branch_name)
+        pr_command = _pr_command(title=pr_title, body=pr_body)
+        pr_instructions = _pr_instructions(repository=repository, pr_url=pr_url)
 
         return PublicationPackage(
             status="ready_to_publish",
@@ -42,6 +46,9 @@ class PublicationPreparer:
             commit_message=commit_message,
             pr_title=pr_title,
             pr_body=pr_body,
+            pr_url=pr_url,
+            pr_command=pr_command,
+            pr_instructions=pr_instructions,
             changed_files=changed_files,
             commands=commands,
             git_safety=git_safety,
@@ -132,6 +139,29 @@ def _commands(
     return commands
 
 
+def _pr_url(repository: str | None, branch_name: str) -> str | None:
+    if not repository:
+        return None
+    return f"https://github.com/{repository}/pull/new/{branch_name}"
+
+
+def _pr_command(*, title: str, body: str) -> str:
+    return f"gh pr create --title {_quote(title)} --body {_quote(body)}"
+
+
+def _pr_instructions(repository: str | None, pr_url: str | None) -> list[str]:
+    instructions = [
+        "Run the git commands after confirming the git safety report.",
+        "Open a pull request with the generated title and body.",
+    ]
+    if repository and pr_url:
+        instructions.append(f"Use the PR URL after pushing the branch: {pr_url}")
+    else:
+        instructions.append("Use your GitHub repository page to create the PR after pushing the branch.")
+    return instructions
+
+
 def _quote(value: str) -> str:
     escaped = value.replace('"', '\\"')
+    escaped = escaped.replace("\n", "\\n")
     return f'"{escaped}"'

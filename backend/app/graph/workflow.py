@@ -282,6 +282,7 @@ def prepare_publication_node(state: AgentState) -> AgentState:
         approval=approval,
         changed_files=changed_files,
         issue_number=state.get("issue_number"),
+        repository=state.get("repository"),
         git_safety=git_safety,
     )
     return {"publication_package": package.model_dump()}

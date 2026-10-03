@@ -84,6 +84,9 @@ class PublicationPackage(BaseModel):
     commit_message: str
     pr_title: str
     pr_body: str
+    pr_url: str | None = None
+    pr_command: str | None = None
+    pr_instructions: list[str] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
     commands: list[str] = Field(default_factory=list)
     git_safety: GitSafetyReport | None = None

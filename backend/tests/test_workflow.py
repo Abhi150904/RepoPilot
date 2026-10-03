@@ -382,6 +382,9 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
             'git commit -m "cli writes old value"',
             'git push -u origin "cli-writes-old-value"',
         ]
+        assert result["publication_package"]["pr_url"] is None
+        assert result["publication_package"]["pr_command"].startswith("gh pr create")
+        assert "GitHub repository page" in result["publication_package"]["pr_instructions"][2]
         assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
         assert result["run_summary"]["status"] == "approved"

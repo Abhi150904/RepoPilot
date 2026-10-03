@@ -17,12 +17,19 @@ def test_publication_preparer_builds_publication_package() -> None:
         ),
         changed_files=["src/search.py", "tests/test_search.py"],
         issue_number=16,
+        repository="Abhi150904/Wandr",
     )
 
     assert package.status == "ready_to_publish"
     assert package.branch_name == "issue-16-app-crashes-when-destination-field-is-empty"
     assert package.commit_message == "app crashes when destination field is empty"
     assert package.pr_title == "Fix #16: App crashes when destination field is empty"
+    assert package.pr_url == (
+        "https://github.com/Abhi150904/Wandr/pull/new/"
+        "issue-16-app-crashes-when-destination-field-is-empty"
+    )
+    assert package.pr_command.startswith('gh pr create --title "Fix #16:')
+    assert "Use the PR URL after pushing the branch" in package.pr_instructions[2]
     assert "Related issue: #16" in package.pr_body
     assert "src/search.py, tests/test_search.py" in package.pr_body
     assert package.commands == [
@@ -68,6 +75,29 @@ def test_publication_preparer_warns_when_no_changed_files_recorded() -> None:
 
     assert package.commands[1] == (
         "# No changed files were recorded; inspect git status before committing."
+    )
+    assert package.pr_url is None
+    assert "GitHub repository page" in package.pr_instructions[2]
+
+
+def test_publication_preparer_builds_github_cli_command() -> None:
+    package = PublicationPreparer().prepare(
+        issue="Fix login validation",
+        approval=ApprovalDecision(
+            approved=True,
+            status="approved",
+            summary="Human approval was provided for this reviewed patch.",
+            next_action="commit_changes",
+        ),
+        changed_files=["app.py"],
+    )
+
+    assert package.pr_command == (
+        'gh pr create --title "Fix login validation" --body '
+        '"## Summary\\n- Addresses: Fix login validation\\n- Changed files: app.py\\n\\n'
+        '## Validation\\n- Tests passed before human approval.\\n'
+        '- Automated review approved the patch.\\n'
+        '- Human approval was provided before publication."'
     )
 
 

@@ -161,6 +161,7 @@ def main() -> None:
         print()
         print("Publication Package:")
         print(json.dumps(result["publication_package"], indent=2))
+        _print_publication_summary(result["publication_package"])
 
     if "repair_attempts" in result:
         print()
@@ -171,6 +172,41 @@ def main() -> None:
         print()
         print("Run Summary:")
         print(json.dumps(result["run_summary"], indent=2))
+
+
+def _print_publication_summary(package: dict[str, object]) -> None:
+    print()
+    print("Publication Commands:")
+    for command in package.get("commands", []):
+        print(command)
+
+    print()
+    print("Pull Request:")
+    print(f"Title: {package['pr_title']}")
+    print("Body:")
+    print(package["pr_body"])
+
+    if package.get("pr_url"):
+        print()
+        print("PR URL:")
+        print(package["pr_url"])
+
+    if package.get("pr_command"):
+        print()
+        print("GitHub CLI Command:")
+        print(package["pr_command"])
+
+    git_safety = package.get("git_safety")
+    if isinstance(git_safety, dict):
+        print()
+        print("Git Safety:")
+        print(f"Status: {git_safety['status']}")
+        print(git_safety["summary"])
+        warnings = git_safety.get("warnings", [])
+        if warnings:
+            print("Warnings:")
+            for warning in warnings:
+                print(f"- {warning}")
 
 
 if __name__ == "__main__":
