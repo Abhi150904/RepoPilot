@@ -19,6 +19,7 @@ from app.schemas.code_change import CodeChangeSet, SourceFile
 from app.schemas.execution import (
     ApprovalDecision,
     PublicationPackage,
+    PublishResult,
     RepairContext,
     RepairDecision,
     ReviewResult,
@@ -86,10 +87,16 @@ def after_approval_gate_route(state: AgentState) -> str:
 
 
 def after_prepare_publication_route(state: AgentState) -> str:
-    if state.get("publish_local"):
+    if state.get("publish_push") or state.get("publish_local"):
         return "publish_local"
     if state.get("publish_dry_run"):
         return "publish_dry_run"
+    return "end"
+
+
+def after_publish_local_route(state: AgentState) -> str:
+    if state.get("publish_push"):
+        return "publish_push"
     return "end"
 
 
@@ -310,6 +317,16 @@ def publish_local_node(state: AgentState) -> AgentState:
     return {"publish_result": result.model_dump()}
 
 
+def publish_push_node(state: AgentState) -> AgentState:
+    package = PublicationPackage.model_validate(state["publication_package"])
+    local_result = PublishResult.model_validate(state["publish_result"])
+    result = PublishExecutor(workspace_path=state.get("workspace_path")).push_branch(
+        package=package,
+        local_result=local_result,
+    )
+    return {"publish_result": result.model_dump()}
+
+
 def summarize_run_node(state: AgentState) -> AgentState:
     summary = RunSummarizer().summarize(dict(state))
     return {"run_summary": summary.model_dump()}
@@ -354,6 +371,7 @@ def build_workflow():
     graph.add_node("prepare_publication", prepare_publication_node)
     graph.add_node("publish_dry_run", publish_dry_run_node)
     graph.add_node("publish_local", publish_local_node)
+    graph.add_node("publish_push", publish_push_node)
     graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
@@ -423,7 +441,15 @@ def build_workflow():
             "end": "summarize_run",
         },
     )
-    graph.add_edge("publish_local", "summarize_run")
+    graph.add_conditional_edges(
+        "publish_local",
+        after_publish_local_route,
+        {
+            "publish_push": "publish_push",
+            "end": "summarize_run",
+        },
+    )
+    graph.add_edge("publish_push", "summarize_run")
     graph.add_edge("publish_dry_run", "summarize_run")
     graph.add_edge("summarize_run", END)
 

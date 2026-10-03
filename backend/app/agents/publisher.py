@@ -101,6 +101,72 @@ class PublishExecutor:
             next_action="push_branch",
         )
 
+    def push_branch(
+        self,
+        package: PublicationPackage,
+        local_result: PublishResult,
+        remote_name: str = "origin",
+    ) -> PublishResult:
+        blockers = _push_blockers(local_result=local_result)
+        if self.workspace_path is None:
+            blockers.append("Workspace path is required for pushing the publication branch.")
+        if blockers:
+            return PublishResult(
+                mode="push",
+                status="blocked",
+                summary="Branch push found blockers to inspect before publishing.",
+                commands=package.commands,
+                executed_commands=local_result.executed_commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url=package.pr_url,
+                commit_sha=local_result.commit_sha,
+                branch_name=local_result.branch_name or package.branch_name,
+                remote_name=remote_name,
+                blockers=blockers,
+                next_action="inspect_failure",
+            )
+
+        root = Path(self.workspace_path)
+        branch_name = local_result.branch_name or package.branch_name
+        display = f"git push -u {remote_name} {branch_name}"
+        completed = _run(
+            args=["git", "push", "-u", remote_name, branch_name],
+            root=root,
+        )
+        if completed.returncode != 0:
+            return PublishResult(
+                mode="push",
+                status="blocked",
+                summary=f"Branch push failed while running: {display}",
+                commands=package.commands,
+                executed_commands=local_result.executed_commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url=package.pr_url,
+                commit_sha=local_result.commit_sha,
+                branch_name=branch_name,
+                remote_name=remote_name,
+                blockers=[completed.stderr.strip() or completed.stdout.strip() or "Git push failed."],
+                next_action="inspect_failure",
+            )
+
+        return PublishResult(
+            mode="push",
+            status="published",
+            summary="Publication branch was pushed to the remote.",
+            commands=package.commands,
+            executed_commands=[*local_result.executed_commands, display],
+            pr_title=package.pr_title,
+            pr_body=package.pr_body,
+            pr_url=package.pr_url,
+            commit_sha=local_result.commit_sha,
+            branch_name=branch_name,
+            remote_name=remote_name,
+            blockers=[],
+            next_action="open_pull_request",
+        )
+
 
 def _blockers(package: PublicationPackage) -> list[str]:
     blockers: list[str] = []
@@ -117,6 +183,17 @@ def _blockers(package: PublicationPackage) -> list[str]:
         blockers.append(f"Git safety status is {safety.status}.")
         blockers.extend(safety.warnings)
 
+    return blockers
+
+
+def _push_blockers(local_result: PublishResult) -> list[str]:
+    blockers: list[str] = []
+    if local_result.mode != "local" or local_result.status != "published":
+        blockers.append("Local publication must complete before pushing.")
+    if not local_result.branch_name:
+        blockers.append("Published branch name is missing.")
+    if not local_result.commit_sha:
+        blockers.append("Published commit SHA is missing.")
     return blockers
 
 

@@ -61,6 +61,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Create the publication branch and local commit without pushing or opening a PR.",
     )
+    parser.add_argument(
+        "--publish-push",
+        action="store_true",
+        help="Create the local publication commit and push its branch without opening a PR.",
+    )
     return parser.parse_args()
 
 
@@ -107,6 +112,14 @@ def main() -> None:
         if not args.workspace:
             raise SystemExit("--publish-local requires --workspace.")
         initial_state["publish_local"] = True
+    if args.publish_push:
+        if not args.approve:
+            raise SystemExit("--publish-push requires --approve.")
+        if args.publish_dry_run:
+            raise SystemExit("--publish-push cannot be combined with --publish-dry-run.")
+        if not args.workspace:
+            raise SystemExit("--publish-push requires --workspace.")
+        initial_state["publish_push"] = True
 
     try:
         result = workflow.invoke(initial_state)
@@ -187,7 +200,7 @@ def main() -> None:
 
     if "publish_result" in result:
         print()
-        print("Publish Dry Run:")
+        print("Publish Result:")
         print(json.dumps(result["publish_result"], indent=2))
         _print_publish_result(result["publish_result"])
 

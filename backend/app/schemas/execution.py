@@ -94,7 +94,7 @@ class PublicationPackage(BaseModel):
 
 
 class PublishResult(BaseModel):
-    mode: Literal["dry_run", "local"]
+    mode: Literal["dry_run", "local", "push"]
     status: Literal["ready", "blocked", "published"]
     summary: str
     commands: list[str] = Field(default_factory=list)
@@ -104,8 +104,14 @@ class PublishResult(BaseModel):
     pr_url: str | None = None
     commit_sha: str | None = None
     branch_name: str | None = None
+    remote_name: str | None = None
     blockers: list[str] = Field(default_factory=list)
-    next_action: Literal["run_publication_commands", "push_branch", "inspect_failure"]
+    next_action: Literal[
+        "run_publication_commands",
+        "push_branch",
+        "open_pull_request",
+        "inspect_failure",
+    ]
 
 
 class RunSummary(BaseModel):

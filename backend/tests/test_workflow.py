@@ -375,6 +375,22 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
                 next_action="push_branch",
             )
 
+        def push_branch(self, package, local_result):
+            assert local_result.mode == "local"
+            return PublishResult(
+                mode="push",
+                status="published",
+                summary="Publication branch was pushed.",
+                commands=package.commands,
+                executed_commands=[*local_result.executed_commands, "git push -u origin cli-writes-old-value"],
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                branch_name=package.branch_name,
+                commit_sha=local_result.commit_sha,
+                remote_name="origin",
+                next_action="open_pull_request",
+            )
+
     monkeypatch.setattr(workflow_module, "PublishExecutor", FakePublishExecutor)
     workflow = build_workflow()
 
@@ -385,7 +401,7 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
                 "apply_changes": True,
                 "run_tests": True,
                 "approved": True,
-                "publish_local": True,
+                "publish_push": True,
                 "workspace_path": str(root),
             }
         )
@@ -409,10 +425,11 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert "GitHub repository page" in result["publication_package"]["pr_instructions"][2]
         assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
-        assert result["publish_result"]["mode"] == "local"
+        assert result["publish_result"]["mode"] == "push"
         assert result["publish_result"]["status"] == "published"
         assert result["publish_result"]["commit_sha"] == "abc123"
-        assert result["publish_result"]["next_action"] == "push_branch"
+        assert result["publish_result"]["remote_name"] == "origin"
+        assert result["publish_result"]["next_action"] == "open_pull_request"
         assert result["run_summary"]["status"] == "approved"
         assert result["run_summary"]["next_action"] == "commit_changes"
     finally:

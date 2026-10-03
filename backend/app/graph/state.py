@@ -33,5 +33,6 @@ class AgentState(TypedDict, total=False):
     publication_package: dict[str, object]
     publish_dry_run: bool
     publish_local: bool
+    publish_push: bool
     publish_result: dict[str, object]
     run_summary: dict[str, object]

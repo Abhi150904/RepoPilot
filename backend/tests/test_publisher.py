@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from app.agents.publisher import PublishExecutor
-from app.schemas.execution import GitSafetyReport, PublicationPackage
+from app.schemas.execution import GitSafetyReport, PublicationPackage, PublishResult
 
 
 def test_publish_executor_dry_run_marks_safe_package_ready() -> None:
@@ -145,6 +145,79 @@ def test_publish_executor_local_blocks_without_workspace() -> None:
 
     assert result.status == "blocked"
     assert "Workspace path is required for local publication." in result.blockers
+
+
+def test_publish_executor_pushes_published_branch(tmp_path) -> None:
+    remote = tmp_path / "remote.git"
+    workspace = tmp_path / "workspace"
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(tmp_path, "clone", str(remote), str(workspace))
+    _git(workspace, "config", "user.email", "test@example.com")
+    _git(workspace, "config", "user.name", "RepoPilot Test")
+    (workspace / "app.py").write_text("print('fixed')\n", encoding="utf-8")
+
+    package = PublicationPackage(
+        status="ready_to_publish",
+        branch_name="fix-login-validation",
+        commit_message="fix login validation",
+        pr_title="Fix login validation",
+        pr_body="## Summary\n- Fix login validation",
+        changed_files=["app.py"],
+        commands=[
+            'git checkout -b "fix-login-validation"',
+            'git add "app.py"',
+            'git commit -m "fix login validation"',
+            'git push -u origin "fix-login-validation"',
+        ],
+        git_safety=GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+        ),
+        next_action="create_pull_request",
+    )
+    executor = PublishExecutor(workspace_path=str(workspace))
+    local_result = executor.publish_local(package)
+
+    result = executor.push_branch(package=package, local_result=local_result)
+
+    assert result.mode == "push"
+    assert result.status == "published"
+    assert result.branch_name == "fix-login-validation"
+    assert result.remote_name == "origin"
+    assert result.commit_sha == local_result.commit_sha
+    assert result.executed_commands[-1] == "git push -u origin fix-login-validation"
+    assert result.next_action == "open_pull_request"
+    assert _git_output(remote, "rev-parse", "fix-login-validation") == result.commit_sha
+
+
+def test_publish_executor_push_blocks_without_local_publication(tmp_path) -> None:
+    result = PublishExecutor(workspace_path=str(tmp_path)).push_branch(
+        package=PublicationPackage(
+            status="ready_to_publish",
+            branch_name="fix-login-validation",
+            commit_message="fix login validation",
+            pr_title="Fix login validation",
+            pr_body="## Summary\n- Fix login validation",
+            changed_files=["app.py"],
+            commands=['git add "app.py"'],
+            git_safety=GitSafetyReport(
+                status="safe",
+                summary="Git safety check found only RepoPilot-applied changes.",
+            ),
+            next_action="create_pull_request",
+        ),
+        local_result=PublishResult(
+            mode="dry_run",
+            status="ready",
+            summary="Publication dry run passed.",
+            pr_title="Fix login validation",
+            pr_body="## Summary\n- Fix login validation",
+            next_action="run_publication_commands",
+        ),
+    )
+
+    assert result.status == "blocked"
+    assert "Local publication must complete before pushing." in result.blockers
 
 
 def _git(path, *args: str) -> None:
