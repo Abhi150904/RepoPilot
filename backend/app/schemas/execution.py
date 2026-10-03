@@ -93,6 +93,18 @@ class PublicationPackage(BaseModel):
     next_action: Literal["create_pull_request"]
 
 
+class PublishResult(BaseModel):
+    mode: Literal["dry_run"]
+    status: Literal["ready", "blocked"]
+    summary: str
+    commands: list[str] = Field(default_factory=list)
+    pr_title: str
+    pr_body: str
+    pr_url: str | None = None
+    blockers: list[str] = Field(default_factory=list)
+    next_action: Literal["run_publication_commands", "inspect_failure"]
+
+
 class RunSummary(BaseModel):
     status: Literal[
         "planned_only",

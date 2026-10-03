@@ -364,6 +364,7 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
                 "apply_changes": True,
                 "run_tests": True,
                 "approved": True,
+                "publish_dry_run": True,
                 "workspace_path": str(root),
             }
         )
@@ -387,6 +388,9 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert "GitHub repository page" in result["publication_package"]["pr_instructions"][2]
         assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
+        assert result["publish_result"]["mode"] == "dry_run"
+        assert result["publish_result"]["status"] == "ready"
+        assert result["publish_result"]["next_action"] == "run_publication_commands"
         assert result["run_summary"]["status"] == "approved"
         assert result["run_summary"]["next_action"] == "commit_changes"
     finally:

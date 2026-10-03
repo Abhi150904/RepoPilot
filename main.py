@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Mark the reviewed patch as explicitly approved for later publication steps.",
     )
+    parser.add_argument(
+        "--publish-dry-run",
+        action="store_true",
+        help="Validate the publication package without running git or GitHub commands.",
+    )
     return parser.parse_args()
 
 
@@ -85,6 +90,10 @@ def main() -> None:
         initial_state["test_command"] = args.test_command
     if args.approve:
         initial_state["approved"] = True
+    if args.publish_dry_run:
+        if not args.approve:
+            raise SystemExit("--publish-dry-run requires --approve.")
+        initial_state["publish_dry_run"] = True
 
     try:
         result = workflow.invoke(initial_state)
@@ -163,6 +172,12 @@ def main() -> None:
         print(json.dumps(result["publication_package"], indent=2))
         _print_publication_summary(result["publication_package"])
 
+    if "publish_result" in result:
+        print()
+        print("Publish Dry Run:")
+        print(json.dumps(result["publish_result"], indent=2))
+        _print_publish_result(result["publish_result"])
+
     if "repair_attempts" in result:
         print()
         print("Repair Attempts:")
@@ -207,6 +222,17 @@ def _print_publication_summary(package: dict[str, object]) -> None:
             print("Warnings:")
             for warning in warnings:
                 print(f"- {warning}")
+
+
+def _print_publish_result(result: dict[str, object]) -> None:
+    print()
+    print("Publish Status:")
+    print(f"{result['status']}: {result['summary']}")
+    blockers = result.get("blockers", [])
+    if blockers:
+        print("Blockers:")
+        for blocker in blockers:
+            print(f"- {blocker}")
 
 
 if __name__ == "__main__":
