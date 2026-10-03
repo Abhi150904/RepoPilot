@@ -361,6 +361,12 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert result["review_result"]["approved"] is True
         assert result["approval_decision"]["approved"] is True
         assert result["approval_decision"]["status"] == "approved"
+        assert result["publication_package"]["status"] == "ready_to_publish"
+        assert result["publication_package"]["branch_name"] == "cli-writes-old-value"
+        assert result["publication_package"]["commit_message"] == "cli writes old value"
+        assert result["publication_package"]["pr_title"] == "CLI writes old value"
+        assert result["publication_package"]["changed_files"] == ["src/example.py"]
+        assert result["publication_package"]["next_action"] == "create_pull_request"
         assert result["run_summary"]["status"] == "approved"
         assert result["run_summary"]["next_action"] == "commit_changes"
     finally:

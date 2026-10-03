@@ -157,6 +157,11 @@ def main() -> None:
         print("Approval Decision:")
         print(json.dumps(result["approval_decision"], indent=2))
 
+    if "publication_package" in result:
+        print()
+        print("Publication Package:")
+        print(json.dumps(result["publication_package"], indent=2))
+
     if "repair_attempts" in result:
         print()
         print("Repair Attempts:")

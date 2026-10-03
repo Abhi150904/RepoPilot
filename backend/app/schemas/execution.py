@@ -64,6 +64,16 @@ class ApprovalDecision(BaseModel):
     next_action: Literal["human_review", "commit_changes", "inspect_failure"]
 
 
+class PublicationPackage(BaseModel):
+    status: Literal["ready_to_publish"]
+    branch_name: str
+    commit_message: str
+    pr_title: str
+    pr_body: str
+    changed_files: list[str] = Field(default_factory=list)
+    next_action: Literal["create_pull_request"]
+
+
 class RunSummary(BaseModel):
     status: Literal[
         "planned_only",

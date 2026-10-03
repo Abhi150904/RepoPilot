@@ -30,4 +30,5 @@ class AgentState(TypedDict, total=False):
     review_result: dict[str, object]
     approved: bool
     approval_decision: dict[str, object]
+    publication_package: dict[str, object]
     run_summary: dict[str, object]

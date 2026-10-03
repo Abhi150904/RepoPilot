@@ -91,6 +91,44 @@ def test_run_summarizer_marks_human_approved_review_as_approved() -> None:
     assert summary.next_action == "commit_changes"
 
 
+def test_run_summarizer_mentions_ready_publication_package() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "test_analysis": {
+                "status": "passed",
+                "summary": "The sandbox test command passed 1 test(s).",
+                "failure_reason": None,
+                "next_action": "ready_for_review",
+            },
+            "review_result": {
+                "approved": True,
+                "summary": "Automated review approved the tested patch.",
+                "findings": [],
+                "next_action": "await_human_approval",
+            },
+            "approval_decision": {
+                "approved": True,
+                "status": "approved",
+                "summary": "Human approval was provided for this reviewed patch.",
+                "next_action": "commit_changes",
+            },
+            "publication_package": {
+                "status": "ready_to_publish",
+                "branch_name": "fix-login-validation",
+                "commit_message": "fix login validation",
+                "pr_title": "Fix login validation",
+                "pr_body": "## Summary\n- Fix login validation",
+                "changed_files": ["app.py"],
+                "next_action": "create_pull_request",
+            },
+        }
+    )
+
+    assert summary.status == "approved"
+    assert "publication details are ready" in summary.summary
+    assert summary.next_action == "commit_changes"
+
+
 def test_run_summarizer_marks_rejected_review_as_review_failed() -> None:
     summary = RunSummarizer().summarize(
         {

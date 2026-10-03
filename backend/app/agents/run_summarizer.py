@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.schemas.execution import ApprovalDecision, RepairDecision, ReviewResult, RunSummary, TestAnalysis
+from app.schemas.execution import (
+    ApprovalDecision,
+    PublicationPackage,
+    RepairDecision,
+    ReviewResult,
+    RunSummary,
+    TestAnalysis,
+)
 
 
 class RunSummarizer:
@@ -49,6 +56,15 @@ def _summarize_tested_run(
                 if "approval_decision" in state:
                     approval = ApprovalDecision.model_validate(state["approval_decision"])
                     if approval.approved:
+                        if "publication_package" in state:
+                            PublicationPackage.model_validate(state["publication_package"])
+                            return RunSummary(
+                                status="approved",
+                                summary="Tests passed, reviews approved the patch, and publication details are ready.",
+                                tests_passed=True,
+                                repair_attempts=repair_attempts,
+                                next_action="commit_changes",
+                            )
                         return RunSummary(
                             status="approved",
                             summary="Tests passed, automated review approved the patch, and human approval was provided.",
