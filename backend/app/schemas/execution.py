@@ -57,6 +57,13 @@ class ReviewResult(BaseModel):
     next_action: Literal["await_human_approval", "repair", "needs_human"]
 
 
+class ApprovalDecision(BaseModel):
+    approved: bool
+    status: Literal["awaiting_approval", "approved", "not_ready"]
+    summary: str
+    next_action: Literal["human_review", "commit_changes", "inspect_failure"]
+
+
 class RunSummary(BaseModel):
     status: Literal[
         "planned_only",
@@ -64,6 +71,7 @@ class RunSummary(BaseModel):
         "changes_applied",
         "ready_for_review",
         "awaiting_approval",
+        "approved",
         "review_failed",
         "repair_needed",
         "repair_failed",

@@ -62,6 +62,35 @@ def test_run_summarizer_marks_approved_review_as_awaiting_approval() -> None:
     assert summary.next_action == "human_review"
 
 
+def test_run_summarizer_marks_human_approved_review_as_approved() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "test_analysis": {
+                "status": "passed",
+                "summary": "The sandbox test command passed 1 test(s).",
+                "failure_reason": None,
+                "next_action": "ready_for_review",
+            },
+            "review_result": {
+                "approved": True,
+                "summary": "Automated review approved the tested patch.",
+                "findings": [],
+                "next_action": "await_human_approval",
+            },
+            "approval_decision": {
+                "approved": True,
+                "status": "approved",
+                "summary": "Human approval was provided for this reviewed patch.",
+                "next_action": "commit_changes",
+            },
+        }
+    )
+
+    assert summary.status == "approved"
+    assert summary.tests_passed is True
+    assert summary.next_action == "commit_changes"
+
+
 def test_run_summarizer_marks_rejected_review_as_review_failed() -> None:
     summary = RunSummarizer().summarize(
         {

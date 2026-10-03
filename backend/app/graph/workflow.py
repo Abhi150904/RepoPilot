@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.approval import ApprovalGate
 from app.agents.analyzer import IssueAnalyzer
 from app.agents.coder import CodeWriter
 from app.agents.planner import Planner
@@ -13,7 +14,7 @@ from app.agents.test_analyzer import TestAnalyzer
 from app.core.llm import get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet, SourceFile
-from app.schemas.execution import RepairContext, RepairDecision, TestAnalysis, TestResult
+from app.schemas.execution import RepairContext, RepairDecision, ReviewResult, TestAnalysis, TestResult
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
@@ -242,6 +243,15 @@ def review_changes_node(state: AgentState) -> AgentState:
     return {"review_result": result.model_dump()}
 
 
+def approval_gate_node(state: AgentState) -> AgentState:
+    review = ReviewResult.model_validate(state["review_result"])
+    decision = ApprovalGate().decide(
+        review=review,
+        approved=state.get("approved", False),
+    )
+    return {"approval_decision": decision.model_dump()}
+
+
 def summarize_run_node(state: AgentState) -> AgentState:
     summary = RunSummarizer().summarize(dict(state))
     return {"run_summary": summary.model_dump()}
@@ -282,6 +292,7 @@ def build_workflow():
     graph.add_node("decide_repair", decide_repair_node)
     graph.add_node("prepare_repair", prepare_repair_node)
     graph.add_node("review_changes", review_changes_node)
+    graph.add_node("approval_gate", approval_gate_node)
     graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
@@ -333,7 +344,8 @@ def build_workflow():
         },
     )
     graph.add_edge("prepare_repair", "load_target_files")
-    graph.add_edge("review_changes", "summarize_run")
+    graph.add_edge("review_changes", "approval_gate")
+    graph.add_edge("approval_gate", "summarize_run")
     graph.add_edge("summarize_run", END)
 
     return graph.compile()

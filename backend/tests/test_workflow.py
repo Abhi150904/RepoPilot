@@ -291,8 +291,78 @@ def test_workflow_runs_tests_after_applying_changes(monkeypatch) -> None:
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
         assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["status"] == "awaiting_approval"
+        assert result["approval_decision"]["next_action"] == "human_review"
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert events == [("test", "new value\n")]
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
+    monkeypatch,
+) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+
+    class FakeCodeWriter:
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self,
+            issue,
+            analysis=None,
+            plan=None,
+            target_files=None,
+            repository_context=None,
+            repair_context=None,
+        ):
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content="new value\n",
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "approved": True,
+                "workspace_path": str(root),
+            }
+        )
+
+        assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["approved"] is True
+        assert result["approval_decision"]["status"] == "approved"
+        assert result["run_summary"]["status"] == "approved"
+        assert result["run_summary"]["next_action"] == "commit_changes"
     finally:
         _remove_workspace_dir(root)
 
@@ -413,6 +483,7 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
         assert result["test_analysis"]["status"] == "passed"
         assert result["repair_decision"]["next_action"] == "ready_for_review"
         assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["status"] == "awaiting_approval"
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["repair_attempts"] == 1
         assert target_file.read_text(encoding="utf-8") == "new value 2\n"
@@ -611,6 +682,7 @@ def test_workflow_fixes_broken_python_fixture_end_to_end(monkeypatch) -> None:
         assert "email is required" in updated_source
         assert result["modified_files"] == ["app.py"]
         assert result["review_result"]["approved"] is True
+        assert result["approval_decision"]["status"] == "awaiting_approval"
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["tests_passed"] is True
     finally:

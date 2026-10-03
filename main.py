@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Maximum automated repair retries after test failures.",
     )
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="Mark the reviewed patch as explicitly approved for later publication steps.",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +83,8 @@ def main() -> None:
         if not args.run_tests:
             raise SystemExit("--test-command can only be used with --run-tests.")
         initial_state["test_command"] = args.test_command
+    if args.approve:
+        initial_state["approved"] = True
 
     try:
         result = workflow.invoke(initial_state)
@@ -144,6 +151,11 @@ def main() -> None:
         print()
         print("Review Result:")
         print(json.dumps(result["review_result"], indent=2))
+
+    if "approval_decision" in result:
+        print()
+        print("Approval Decision:")
+        print(json.dumps(result["approval_decision"], indent=2))
 
     if "repair_attempts" in result:
         print()
