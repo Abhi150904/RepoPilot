@@ -220,6 +220,95 @@ def test_publish_executor_push_blocks_without_local_publication(tmp_path) -> Non
     assert "Local publication must complete before pushing." in result.blockers
 
 
+def test_publish_executor_opens_pull_request_after_push() -> None:
+    class FakeGitHub:
+        def create_pull_request(self, *, repo, title, body, head, base):
+            assert repo == "Abhi150904/Wandr"
+            assert title == "Fix login validation"
+            assert head == "fix-login-validation"
+            assert base == "main"
+            from app.schemas.execution import PullRequestResult
+
+            return PullRequestResult(
+                number=17,
+                url="https://github.com/Abhi150904/Wandr/pull/17",
+                title=title,
+                head=head,
+                base=base,
+            )
+
+    result = PublishExecutor().open_pull_request(
+        package=PublicationPackage(
+            status="ready_to_publish",
+            branch_name="fix-login-validation",
+            commit_message="fix login validation",
+            pr_title="Fix login validation",
+            pr_body="## Summary\n- Fix login validation",
+            changed_files=["app.py"],
+            commands=['git add "app.py"'],
+            git_safety=GitSafetyReport(
+                status="safe",
+                summary="Git safety check found only RepoPilot-applied changes.",
+            ),
+            next_action="create_pull_request",
+        ),
+        push_result=PublishResult(
+            mode="push",
+            status="published",
+            summary="Publication branch was pushed.",
+            pr_title="Fix login validation",
+            pr_body="## Summary\n- Fix login validation",
+            branch_name="fix-login-validation",
+            commit_sha="abc123",
+            remote_name="origin",
+            next_action="open_pull_request",
+        ),
+        repository="Abhi150904/Wandr",
+        github=FakeGitHub(),
+    )
+
+    assert result.mode == "pr"
+    assert result.status == "published"
+    assert result.pr_url == "https://github.com/Abhi150904/Wandr/pull/17"
+    assert result.pull_request is not None
+    assert result.pull_request.number == 17
+    assert result.commit_sha == "abc123"
+    assert result.next_action == "review_pull_request"
+
+
+def test_publish_executor_pr_blocks_without_successful_push() -> None:
+    result = PublishExecutor().open_pull_request(
+        package=PublicationPackage(
+            status="ready_to_publish",
+            branch_name="fix-login-validation",
+            commit_message="fix login validation",
+            pr_title="Fix login validation",
+            pr_body="## Summary\n- Fix login validation",
+            changed_files=["app.py"],
+            commands=['git add "app.py"'],
+            git_safety=GitSafetyReport(
+                status="safe",
+                summary="Git safety check found only RepoPilot-applied changes.",
+            ),
+            next_action="create_pull_request",
+        ),
+        push_result=PublishResult(
+            mode="local",
+            status="published",
+            summary="Local publication completed.",
+            pr_title="Fix login validation",
+            pr_body="## Summary\n- Fix login validation",
+            branch_name="fix-login-validation",
+            commit_sha="abc123",
+            next_action="push_branch",
+        ),
+        repository="Abhi150904/Wandr",
+    )
+
+    assert result.status == "blocked"
+    assert "Branch push must complete before opening a pull request." in result.blockers
+
+
 def _git(path, *args: str) -> None:
     completed = subprocess.run(
         ["git", *args],

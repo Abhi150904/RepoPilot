@@ -391,6 +391,31 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
                 next_action="open_pull_request",
             )
 
+        def open_pull_request(self, package, push_result, repository, github=None):
+            assert push_result.mode == "push"
+            assert repository is None
+            return PublishResult(
+                mode="pr",
+                status="published",
+                summary="Pull request was opened successfully.",
+                commands=package.commands,
+                executed_commands=push_result.executed_commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url="https://github.com/example/demo/pull/17",
+                branch_name=package.branch_name,
+                commit_sha=push_result.commit_sha,
+                remote_name=push_result.remote_name,
+                pull_request={
+                    "number": 17,
+                    "url": "https://github.com/example/demo/pull/17",
+                    "title": package.pr_title,
+                    "head": package.branch_name,
+                    "base": "main",
+                },
+                next_action="review_pull_request",
+            )
+
     monkeypatch.setattr(workflow_module, "PublishExecutor", FakePublishExecutor)
     workflow = build_workflow()
 
@@ -401,7 +426,7 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
                 "apply_changes": True,
                 "run_tests": True,
                 "approved": True,
-                "publish_push": True,
+                "publish_pr": True,
                 "workspace_path": str(root),
             }
         )
@@ -425,11 +450,13 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert "GitHub repository page" in result["publication_package"]["pr_instructions"][2]
         assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
-        assert result["publish_result"]["mode"] == "push"
+        assert result["publish_result"]["mode"] == "pr"
         assert result["publish_result"]["status"] == "published"
         assert result["publish_result"]["commit_sha"] == "abc123"
         assert result["publish_result"]["remote_name"] == "origin"
-        assert result["publish_result"]["next_action"] == "open_pull_request"
+        assert result["publish_result"]["pull_request"]["number"] == 17
+        assert result["publish_result"]["pr_url"] == "https://github.com/example/demo/pull/17"
+        assert result["publish_result"]["next_action"] == "review_pull_request"
         assert result["run_summary"]["status"] == "approved"
         assert result["run_summary"]["next_action"] == "commit_changes"
     finally:

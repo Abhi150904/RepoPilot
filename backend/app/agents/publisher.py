@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 
 from app.schemas.execution import PublicationPackage, PublishResult
+from app.tools.github import GitHubClient, GitHubError
 
 
 class PublishExecutor:
@@ -167,6 +168,77 @@ class PublishExecutor:
             next_action="open_pull_request",
         )
 
+    def open_pull_request(
+        self,
+        package: PublicationPackage,
+        push_result: PublishResult,
+        *,
+        repository: str | None,
+        github: GitHubClient | None = None,
+        base_branch: str = "main",
+    ) -> PublishResult:
+        blockers = _pr_blockers(push_result=push_result, repository=repository)
+        if blockers:
+            return PublishResult(
+                mode="pr",
+                status="blocked",
+                summary="Pull request creation found blockers to inspect.",
+                commands=package.commands,
+                executed_commands=push_result.executed_commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url=package.pr_url,
+                commit_sha=push_result.commit_sha,
+                branch_name=push_result.branch_name or package.branch_name,
+                remote_name=push_result.remote_name,
+                blockers=blockers,
+                next_action="inspect_failure",
+            )
+
+        branch_name = push_result.branch_name or package.branch_name
+        client = github or GitHubClient()
+        try:
+            pull_request = client.create_pull_request(
+                repo=repository or "",
+                title=package.pr_title,
+                body=package.pr_body,
+                head=branch_name,
+                base=base_branch,
+            )
+        except GitHubError as exc:
+            return PublishResult(
+                mode="pr",
+                status="blocked",
+                summary="Pull request creation failed.",
+                commands=package.commands,
+                executed_commands=push_result.executed_commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url=package.pr_url,
+                commit_sha=push_result.commit_sha,
+                branch_name=branch_name,
+                remote_name=push_result.remote_name,
+                blockers=[str(exc)],
+                next_action="inspect_failure",
+            )
+
+        return PublishResult(
+            mode="pr",
+            status="published",
+            summary="Pull request was opened successfully.",
+            commands=package.commands,
+            executed_commands=push_result.executed_commands,
+            pr_title=package.pr_title,
+            pr_body=package.pr_body,
+            pr_url=pull_request.url,
+            commit_sha=push_result.commit_sha,
+            branch_name=branch_name,
+            remote_name=push_result.remote_name,
+            pull_request=pull_request,
+            blockers=[],
+            next_action="review_pull_request",
+        )
+
 
 def _blockers(package: PublicationPackage) -> list[str]:
     blockers: list[str] = []
@@ -194,6 +266,19 @@ def _push_blockers(local_result: PublishResult) -> list[str]:
         blockers.append("Published branch name is missing.")
     if not local_result.commit_sha:
         blockers.append("Published commit SHA is missing.")
+    return blockers
+
+
+def _pr_blockers(push_result: PublishResult, repository: str | None) -> list[str]:
+    blockers: list[str] = []
+    if push_result.mode != "push" or push_result.status != "published":
+        blockers.append("Branch push must complete before opening a pull request.")
+    if not push_result.branch_name:
+        blockers.append("Pushed branch name is missing.")
+    if not push_result.commit_sha:
+        blockers.append("Pushed commit SHA is missing.")
+    if not repository:
+        blockers.append("GitHub repository is required to open a pull request.")
     return blockers
 
 
