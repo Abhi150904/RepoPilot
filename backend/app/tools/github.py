@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.schemas.execution import PullRequestResult
 from app.schemas.issue import GitHubIssue
 from app.schemas.repository import RepositoryFile
 
@@ -53,6 +54,33 @@ class GitHubClient:
         data = self._request("GET", "/search/code", q=f"{query} repo:{repo}")
         return [item["path"] for item in data.get("items", []) if "path" in item]
 
+    def create_pull_request(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+    ) -> PullRequestResult:
+        data = self._request(
+            "POST",
+            f"/repos/{repo}/pulls",
+            json={
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+            },
+        )
+        return PullRequestResult(
+            number=data["number"],
+            url=data["html_url"],
+            title=data["title"],
+            head=data["head"]["ref"],
+            base=data["base"]["ref"],
+        )
+
     def _request(self, method: str, path: str, **params: str) -> dict[str, Any]:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -62,12 +90,14 @@ class GitHubClient:
             headers["Authorization"] = f"Bearer {self._settings.github_token}"
 
         url = f"{self._base_url}{path}"
+        json_body = params.pop("json", None)
         try:
             response = httpx.request(
                 method,
                 url,
                 headers=headers,
                 params=params,
+                json=json_body,
                 timeout=20.0,
             )
         except httpx.HTTPError as exc:

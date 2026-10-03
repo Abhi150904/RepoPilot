@@ -10,7 +10,7 @@ import pytest
 from app.core.llm import MockLLMProvider
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
-from app.schemas.execution import GitSafetyReport, TestResult as ExecutionResult
+from app.schemas.execution import GitSafetyReport, PublishResult, TestResult as ExecutionResult
 from app.schemas.issue import GitHubIssue
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryFile
@@ -355,6 +355,68 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
             warnings=[],
         ),
     )
+
+    class FakePublishExecutor:
+        def __init__(self, workspace_path=None):
+            self.workspace_path = workspace_path
+
+        def publish_local(self, package):
+            assert self.workspace_path == str(root)
+            return PublishResult(
+                mode="local",
+                status="published",
+                summary="Local publication completed.",
+                commands=package.commands,
+                executed_commands=package.commands[:3],
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                branch_name=package.branch_name,
+                commit_sha="abc123",
+                next_action="push_branch",
+            )
+
+        def push_branch(self, package, local_result):
+            assert local_result.mode == "local"
+            return PublishResult(
+                mode="push",
+                status="published",
+                summary="Publication branch was pushed.",
+                commands=package.commands,
+                executed_commands=[*local_result.executed_commands, "git push -u origin cli-writes-old-value"],
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                branch_name=package.branch_name,
+                commit_sha=local_result.commit_sha,
+                remote_name="origin",
+                next_action="open_pull_request",
+            )
+
+        def open_pull_request(self, package, push_result, repository, github=None):
+            assert push_result.mode == "push"
+            assert repository is None
+            return PublishResult(
+                mode="pr",
+                status="published",
+                summary="Pull request was opened successfully.",
+                commands=package.commands,
+                executed_commands=push_result.executed_commands,
+                pr_title=package.pr_title,
+                pr_body=package.pr_body,
+                pr_url="https://github.com/example/demo/pull/17",
+                branch_name=package.branch_name,
+                commit_sha=push_result.commit_sha,
+                remote_name=push_result.remote_name,
+                pull_request={
+                    "number": 17,
+                    "url": "https://github.com/example/demo/pull/17",
+                    "title": package.pr_title,
+                    "head": package.branch_name,
+                    "base": "main",
+                },
+                next_action="review_pull_request",
+            )
+
+    monkeypatch.setattr(workflow_module, "PublishExecutor", FakePublishExecutor)
     workflow = build_workflow()
 
     try:
@@ -364,6 +426,7 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
                 "apply_changes": True,
                 "run_tests": True,
                 "approved": True,
+                "publish_pr": True,
                 "workspace_path": str(root),
             }
         )
@@ -387,8 +450,89 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert "GitHub repository page" in result["publication_package"]["pr_instructions"][2]
         assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
+        assert result["publish_result"]["mode"] == "pr"
+        assert result["publish_result"]["status"] == "published"
+        assert result["publish_result"]["commit_sha"] == "abc123"
+        assert result["publish_result"]["remote_name"] == "origin"
+        assert result["publish_result"]["pull_request"]["number"] == 17
+        assert result["publish_result"]["pr_url"] == "https://github.com/example/demo/pull/17"
+        assert result["publish_result"]["next_action"] == "review_pull_request"
         assert result["run_summary"]["status"] == "approved"
         assert result["run_summary"]["next_action"] == "commit_changes"
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_can_run_publish_dry_run(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    target_file = root / "src" / "example.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("old value\n", encoding="utf-8")
+
+    class FakeCodeWriter:
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self,
+            issue,
+            analysis=None,
+            plan=None,
+            target_files=None,
+            repository_context=None,
+            repair_context=None,
+        ):
+            return CodeChangeSet(
+                summary="Update example",
+                changes=[
+                    FileChange(
+                        path="src/example.py",
+                        action="modify",
+                        explanation="Update local test file",
+                        proposed_content="new value\n",
+                    )
+                ],
+            )
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    monkeypatch.setattr(
+        workflow_module,
+        "inspect_git_safety",
+        lambda workspace_path, expected_changed_files: GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+            warnings=[],
+        ),
+    )
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "CLI writes old value",
+                "apply_changes": True,
+                "run_tests": True,
+                "approved": True,
+                "publish_dry_run": True,
+                "workspace_path": str(root),
+            }
+        )
+
+        assert result["publish_result"]["mode"] == "dry_run"
+        assert result["publish_result"]["status"] == "ready"
+        assert result["publish_result"]["next_action"] == "run_publication_commands"
     finally:
         _remove_workspace_dir(root)
 

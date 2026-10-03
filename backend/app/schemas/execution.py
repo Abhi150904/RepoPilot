@@ -93,6 +93,37 @@ class PublicationPackage(BaseModel):
     next_action: Literal["create_pull_request"]
 
 
+class PullRequestResult(BaseModel):
+    number: int
+    url: str
+    title: str
+    head: str
+    base: str
+
+
+class PublishResult(BaseModel):
+    mode: Literal["dry_run", "local", "push", "pr"]
+    status: Literal["ready", "blocked", "published"]
+    summary: str
+    commands: list[str] = Field(default_factory=list)
+    executed_commands: list[str] = Field(default_factory=list)
+    pr_title: str
+    pr_body: str
+    pr_url: str | None = None
+    commit_sha: str | None = None
+    branch_name: str | None = None
+    remote_name: str | None = None
+    pull_request: PullRequestResult | None = None
+    blockers: list[str] = Field(default_factory=list)
+    next_action: Literal[
+        "run_publication_commands",
+        "push_branch",
+        "open_pull_request",
+        "review_pull_request",
+        "inspect_failure",
+    ]
+
+
 class RunSummary(BaseModel):
     status: Literal[
         "planned_only",
