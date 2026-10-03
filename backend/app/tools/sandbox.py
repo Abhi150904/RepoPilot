@@ -59,6 +59,44 @@ def run_tests_in_docker(
         )
 
 
+def run_tests_locally(
+    workspace_path: str | Path,
+    command: list[str],
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    output_limit: int = DEFAULT_OUTPUT_LIMIT,
+) -> TestResult:
+    workspace = _resolve_workspace(workspace_path)
+    _validate_command(command)
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        stdout = _truncate_output(completed.stdout, output_limit)
+        stderr = _truncate_output(completed.stderr, output_limit)
+        return TestResult(
+            exit_code=completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=False,
+            command=command,
+            **_count_pytest_results(stdout),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return TestResult(
+            exit_code=124,
+            stdout=_truncate_output(_coerce_output(exc.stdout), output_limit),
+            stderr=_truncate_output(_coerce_output(exc.stderr), output_limit),
+            timed_out=True,
+            command=command,
+        )
+
+
 def build_docker_command(
     workspace_path: Path,
     command: list[str],

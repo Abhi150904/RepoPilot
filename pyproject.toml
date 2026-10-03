@@ -24,3 +24,6 @@ pythonpath = [
 testpaths = [
     "backend/tests",
 ]
+norecursedirs = [
+    "backend/tests/fixtures",
+]
