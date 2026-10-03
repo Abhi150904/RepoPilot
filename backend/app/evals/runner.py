@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Iterable
 
 from app.evals.models import (
@@ -22,20 +24,27 @@ def load_eval_case(path: Path) -> EvalCase:
 def run_eval_case(path: Path) -> EvalCaseResult:
     case = load_eval_case(path)
     workflow_input: dict[str, object] = {"issue": case.issue}
-    workspace_path = resolve_workspace_path(case, path)
-    if workspace_path is not None:
-        workflow_input["workspace_path"] = workspace_path
-    if case.apply_changes:
-        workflow_input["apply_changes"] = True
-    if case.run_tests:
-        workflow_input["run_tests"] = True
-    if case.test_command is not None:
-        workflow_input["test_command"] = case.test_command
-    if case.approved:
-        workflow_input["approved"] = True
+    workspace_path = _prepare_workspace(case=case, case_file=path)
+    try:
+        if workspace_path is not None:
+            workflow_input["workspace_path"] = workspace_path
+        if case.target_paths:
+            workflow_input["target_paths"] = case.target_paths
+        if case.apply_changes:
+            workflow_input["apply_changes"] = True
+        if case.run_tests:
+            workflow_input["run_tests"] = True
+            workflow_input["test_runner"] = case.test_runner
+        if case.test_command is not None:
+            workflow_input["test_command"] = case.test_command
+        if case.approved:
+            workflow_input["approved"] = True
 
-    result = build_workflow().invoke(workflow_input)
-    return evaluate_result(case=case, result=result)
+        result = build_workflow().invoke(workflow_input)
+        return evaluate_result(case=case, result=result)
+    finally:
+        if case.copy_workspace and workspace_path is not None:
+            shutil.rmtree(workspace_path, ignore_errors=True)
 
 
 def run_eval_suite(paths: Iterable[Path]) -> EvalSuiteResult:
@@ -135,6 +144,17 @@ def _run_summary(result: dict[str, object]) -> dict[str, object]:
 def _modified_files(result: dict[str, object]) -> list[str]:
     files = result.get("modified_files")
     return files if isinstance(files, list) else []
+
+
+def _prepare_workspace(case: EvalCase, case_file: Path) -> str | None:
+    workspace_path = resolve_workspace_path(case, case_file)
+    if workspace_path is None or not case.copy_workspace:
+        return workspace_path
+
+    source = Path(workspace_path)
+    target = Path(tempfile.mkdtemp(prefix=f"repopilot-eval-{case.id}-"))
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    return str(target)
 
 
 def _print_report(result: EvalSuiteResult) -> None:

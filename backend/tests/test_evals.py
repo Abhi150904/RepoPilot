@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from app.evals.models import EvalCase
-from app.evals.runner import evaluate_result, load_eval_case, run_eval_suite
+from app.evals.runner import evaluate_result, load_eval_case, run_eval_case, run_eval_suite
 
 
 def test_load_eval_case_from_json(tmp_path) -> None:
@@ -102,8 +103,11 @@ def test_run_eval_suite_uses_workflow_input(monkeypatch, tmp_path) -> None:
                 "id": "missing-email",
                 "issue": "Login endpoint returns 500 when email is missing.",
                 "workspace_path": "fixture",
+                "copy_workspace": True,
+                "target_paths": ["app.py"],
                 "apply_changes": True,
                 "run_tests": True,
+                "test_runner": "local",
                 "approved": True,
                 "expectations": {
                     "final_status": "approved",
@@ -114,13 +118,19 @@ def test_run_eval_suite_uses_workflow_input(monkeypatch, tmp_path) -> None:
         ),
         encoding="utf-8",
     )
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "app.py").write_text("def login(payload):\n    return payload\n", encoding="utf-8")
 
     class FakeWorkflow:
         def invoke(self, workflow_input):
             assert workflow_input["issue"] == "Login endpoint returns 500 when email is missing."
-            assert workflow_input["workspace_path"].endswith("fixture")
+            assert Path(workflow_input["workspace_path"]).exists()
+            assert Path(workflow_input["workspace_path"]).parent != tmp_path
+            assert workflow_input["target_paths"] == ["app.py"]
             assert workflow_input["apply_changes"] is True
             assert workflow_input["run_tests"] is True
+            assert workflow_input["test_runner"] == "local"
             assert workflow_input["approved"] is True
             return {
                 "modified_files": ["app.py"],
@@ -139,3 +149,20 @@ def test_run_eval_suite_uses_workflow_input(monkeypatch, tmp_path) -> None:
     assert result.total == 1
     assert result.passed == 1
     assert result.failed == 0
+
+
+def test_fixture_eval_cases_pass_with_mock_provider(monkeypatch) -> None:
+    from app.core.llm import MockLLMProvider
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "get_llm", lambda role: MockLLMProvider())
+
+    fixture_root = Path(__file__).parent / "fixtures" / "evals"
+    cases = [
+        fixture_root / "login_validation.case.json",
+        fixture_root / "destination_validation.case.json",
+    ]
+
+    results = [run_eval_case(path) for path in cases]
+
+    assert [result.status for result in results] == ["passed", "passed"]

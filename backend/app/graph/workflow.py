@@ -33,7 +33,7 @@ from app.tools.filesystem import WorkspaceFileSystem
 from app.tools.git import inspect_git_safety
 from app.tools.github import GitHubClient
 from app.tools.patch import apply_change_set
-from app.tools.sandbox import run_tests_in_docker
+from app.tools.sandbox import run_tests_in_docker, run_tests_locally
 
 
 def start_route(state: AgentState) -> str:
@@ -160,7 +160,10 @@ def load_target_files_node(state: AgentState) -> AgentState:
     if "repository_context" in state:
         repository_context = RepositoryContext.model_validate(state["repository_context"])
 
-    target_paths = _select_target_paths(plan=plan, repository_context=repository_context)
+    target_paths = [
+        *state.get("target_paths", []),
+        *_select_target_paths(plan=plan, repository_context=repository_context),
+    ]
     source_files: list[SourceFile] = []
     workspace_path = state.get("workspace_path")
     if workspace_path:
@@ -232,10 +235,14 @@ def run_tests_node(state: AgentState) -> AgentState:
         raise ValueError("workspace_path is required when run_tests is true.")
 
     command = state.get("test_command", ["python", "-m", "pytest", "-p", "no:cacheprovider"])
-    result: TestResult = run_tests_in_docker(
-        workspace_path=workspace_path,
-        command=command,
-    )
+    runner = state.get("test_runner", "docker")
+    if runner == "local":
+        result = run_tests_locally(workspace_path=workspace_path, command=command)
+    else:
+        result = run_tests_in_docker(
+            workspace_path=workspace_path,
+            command=command,
+        )
     return {"test_result": result.model_dump()}
 
 

@@ -1,0 +1,17 @@
+{
+  "id": "login-missing-email",
+  "issue": "Login endpoint returns 500 when email is missing.",
+  "workspace_path": "login_validation",
+  "copy_workspace": true,
+  "target_paths": ["app.py"],
+  "apply_changes": true,
+  "run_tests": true,
+  "test_runner": "local",
+  "test_command": ["python", "-m", "pytest", "-p", "no:cacheprovider"],
+  "expectations": {
+    "final_status": "awaiting_approval",
+    "tests_passed": true,
+    "touched_files": ["app.py"],
+    "forbidden_files": ["test_app.py"]
+  }
+}

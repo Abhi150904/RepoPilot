@@ -17,8 +17,11 @@ class EvalCase(BaseModel):
     id: str
     issue: str
     workspace_path: str | None = None
+    copy_workspace: bool = False
+    target_paths: list[str] = Field(default_factory=list)
     apply_changes: bool = False
     run_tests: bool = False
+    test_runner: Literal["docker", "local"] = "docker"
     test_command: list[str] | None = None
     approved: bool = False
     expectations: EvalExpectations = Field(default_factory=EvalExpectations)
