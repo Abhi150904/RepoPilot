@@ -29,20 +29,29 @@ class EvalCase(BaseModel):
 
 class EvalCheck(BaseModel):
     name: str
+    category: Literal["outcome", "tests", "files"]
     passed: bool
     message: str
+    points: int = 1
 
 
 class EvalCaseResult(BaseModel):
     id: str
     status: Literal["passed", "failed"]
     checks: list[EvalCheck]
+    points_earned: int = 0
+    points_possible: int = 0
+    score: float = 0.0
 
 
 class EvalSuiteResult(BaseModel):
     total: int
     passed: int
     failed: int
+    points_earned: int = 0
+    points_possible: int = 0
+    score: float = 0.0
+    category_scores: dict[str, float] = Field(default_factory=dict)
     cases: list[EvalCaseResult]
 
 

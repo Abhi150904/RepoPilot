@@ -51,10 +51,16 @@ def run_eval_suite(paths: Iterable[Path]) -> EvalSuiteResult:
     case_results = [run_eval_case(path) for path in paths]
     passed = sum(1 for result in case_results if result.status == "passed")
     failed = len(case_results) - passed
+    points_earned = sum(result.points_earned for result in case_results)
+    points_possible = sum(result.points_possible for result in case_results)
     return EvalSuiteResult(
         total=len(case_results),
         passed=passed,
         failed=failed,
+        points_earned=points_earned,
+        points_possible=points_possible,
+        score=_score(points_earned, points_possible),
+        category_scores=_category_scores(case_results),
         cases=case_results,
     )
 
@@ -67,7 +73,16 @@ def evaluate_result(case: EvalCase, result: dict[str, object]) -> EvalCaseResult
         _check_forbidden_files(case, result),
     ]
     status = "passed" if all(check.passed for check in checks) else "failed"
-    return EvalCaseResult(id=case.id, status=status, checks=checks)
+    points_possible = sum(check.points for check in checks)
+    points_earned = sum(check.points for check in checks if check.passed)
+    return EvalCaseResult(
+        id=case.id,
+        status=status,
+        checks=checks,
+        points_earned=points_earned,
+        points_possible=points_possible,
+        score=_score(points_earned, points_possible),
+    )
 
 
 def _check_final_status(case: EvalCase, result: dict[str, object]) -> EvalCheck:
@@ -75,12 +90,15 @@ def _check_final_status(case: EvalCase, result: dict[str, object]) -> EvalCheck:
     if expected is None:
         return EvalCheck(
             name="final_status",
+            category="outcome",
             passed=True,
             message="No final status expectation configured.",
+            points=0,
         )
     actual = _run_summary(result).get("status")
     return EvalCheck(
         name="final_status",
+        category="outcome",
         passed=actual == expected,
         message=f"Expected final status {expected!r}; got {actual!r}.",
     )
@@ -91,12 +109,15 @@ def _check_tests_passed(case: EvalCase, result: dict[str, object]) -> EvalCheck:
     if expected is None:
         return EvalCheck(
             name="tests_passed",
+            category="tests",
             passed=True,
             message="No tests-passed expectation configured.",
+            points=0,
         )
     actual = _run_summary(result).get("tests_passed")
     return EvalCheck(
         name="tests_passed",
+        category="tests",
         passed=actual is expected,
         message=f"Expected tests_passed {expected!r}; got {actual!r}.",
     )
@@ -107,13 +128,16 @@ def _check_touched_files(case: EvalCase, result: dict[str, object]) -> EvalCheck
     if not expected:
         return EvalCheck(
             name="touched_files",
+            category="files",
             passed=True,
             message="No touched-file expectation configured.",
+            points=0,
         )
     actual = set(_modified_files(result))
     missing = sorted(expected - actual)
     return EvalCheck(
         name="touched_files",
+        category="files",
         passed=not missing,
         message=f"Missing expected touched files: {missing}.",
     )
@@ -124,13 +148,16 @@ def _check_forbidden_files(case: EvalCase, result: dict[str, object]) -> EvalChe
     if not forbidden:
         return EvalCheck(
             name="forbidden_files",
+            category="files",
             passed=True,
             message="No forbidden-file expectation configured.",
+            points=0,
         )
     actual = set(_modified_files(result))
     touched_forbidden = sorted(forbidden & actual)
     return EvalCheck(
         name="forbidden_files",
+        category="files",
         passed=not touched_forbidden,
         message=f"Touched forbidden files: {touched_forbidden}.",
     )
@@ -157,13 +184,49 @@ def _prepare_workspace(case: EvalCase, case_file: Path) -> str | None:
     return str(target)
 
 
+def _score(points_earned: int, points_possible: int) -> float:
+    if points_possible == 0:
+        return 1.0
+    return round(points_earned / points_possible, 4)
+
+
+def _category_scores(results: list[EvalCaseResult]) -> dict[str, float]:
+    totals: dict[str, tuple[int, int]] = {}
+    for result in results:
+        for check in result.checks:
+            earned, possible = totals.get(check.category, (0, 0))
+            totals[check.category] = (
+                earned + (check.points if check.passed else 0),
+                possible + check.points,
+            )
+    return {
+        category: _score(earned, possible)
+        for category, (earned, possible) in totals.items()
+        if possible > 0
+    }
+
+
 def _print_report(result: EvalSuiteResult) -> None:
-    print(f"Eval cases: {result.passed}/{result.total} passed")
+    percent = int(result.score * 100)
+    print(
+        f"Eval cases: {result.passed}/{result.total} passed "
+        f"({result.points_earned}/{result.points_possible} points, {percent}%)"
+    )
+    if result.category_scores:
+        categories = ", ".join(
+            f"{category}={int(score * 100)}%"
+            for category, score in sorted(result.category_scores.items())
+        )
+        print(f"Categories: {categories}")
     for case in result.cases:
-        print(f"- {case.id}: {case.status}")
+        case_percent = int(case.score * 100)
+        print(
+            f"- {case.id}: {case.status} "
+            f"({case.points_earned}/{case.points_possible}, {case_percent}%)"
+        )
         for check in case.checks:
             marker = "ok" if check.passed else "fail"
-            print(f"  [{marker}] {check.name}: {check.message}")
+            print(f"  [{marker}] {check.category}.{check.name}: {check.message}")
 
 
 def main() -> None:

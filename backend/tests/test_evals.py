@@ -60,6 +60,9 @@ def test_evaluate_result_passes_when_expectations_match() -> None:
 
     assert result.status == "passed"
     assert all(check.passed for check in result.checks)
+    assert result.points_earned == 4
+    assert result.points_possible == 4
+    assert result.score == 1.0
 
 
 def test_evaluate_result_fails_with_actionable_check_messages() -> None:
@@ -93,6 +96,9 @@ def test_evaluate_result_fails_with_actionable_check_messages() -> None:
         "touched_files",
         "forbidden_files",
     }
+    assert result.points_earned == 0
+    assert result.points_possible == 4
+    assert result.score == 0.0
 
 
 def test_run_eval_suite_uses_workflow_input(monkeypatch, tmp_path) -> None:
@@ -149,6 +155,13 @@ def test_run_eval_suite_uses_workflow_input(monkeypatch, tmp_path) -> None:
     assert result.total == 1
     assert result.passed == 1
     assert result.failed == 0
+    assert result.points_earned == 3
+    assert result.points_possible == 3
+    assert result.category_scores == {
+        "files": 1.0,
+        "outcome": 1.0,
+        "tests": 1.0,
+    }
 
 
 def test_fixture_eval_cases_pass_with_mock_provider(monkeypatch) -> None:
@@ -166,3 +179,4 @@ def test_fixture_eval_cases_pass_with_mock_provider(monkeypatch) -> None:
     results = [run_eval_case(path) for path in cases]
 
     assert [result.status for result in results] == ["passed", "passed"]
+    assert [result.score for result in results] == [1.0, 1.0]
