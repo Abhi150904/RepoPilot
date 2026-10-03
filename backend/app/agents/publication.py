@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.schemas.execution import ApprovalDecision, PublicationPackage
+from app.schemas.execution import ApprovalDecision, GitSafetyReport, PublicationPackage
 
 
 class PublicationPreparer:
@@ -15,6 +15,7 @@ class PublicationPreparer:
         approval: ApprovalDecision,
         changed_files: list[str],
         issue_number: int | None = None,
+        git_safety: GitSafetyReport | None = None,
     ) -> PublicationPackage:
         if not approval.approved:
             raise ValueError("Publication can only be prepared after human approval.")
@@ -37,6 +38,7 @@ class PublicationPreparer:
             pr_title=pr_title,
             pr_body=pr_body,
             changed_files=changed_files,
+            git_safety=git_safety,
             next_action="create_pull_request",
         )
 

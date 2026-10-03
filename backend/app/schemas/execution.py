@@ -64,6 +64,20 @@ class ApprovalDecision(BaseModel):
     next_action: Literal["human_review", "commit_changes", "inspect_failure"]
 
 
+class GitChangedFile(BaseModel):
+    status: str
+    path: str
+
+
+class GitSafetyReport(BaseModel):
+    status: Literal["safe", "needs_attention", "not_git_repository", "unavailable"]
+    summary: str
+    current_branch: str | None = None
+    changed_files: list[GitChangedFile] = Field(default_factory=list)
+    unexpected_files: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class PublicationPackage(BaseModel):
     status: Literal["ready_to_publish"]
     branch_name: str
@@ -71,6 +85,7 @@ class PublicationPackage(BaseModel):
     pr_title: str
     pr_body: str
     changed_files: list[str] = Field(default_factory=list)
+    git_safety: GitSafetyReport | None = None
     next_action: Literal["create_pull_request"]
 
 

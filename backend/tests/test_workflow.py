@@ -10,7 +10,7 @@ import pytest
 from app.core.llm import MockLLMProvider
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
-from app.schemas.execution import TestResult as ExecutionResult
+from app.schemas.execution import GitSafetyReport, TestResult as ExecutionResult
 from app.schemas.issue import GitHubIssue
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryFile
@@ -345,6 +345,16 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
 
     monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
     monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    monkeypatch.setattr(
+        workflow_module,
+        "inspect_git_safety",
+        lambda workspace_path, expected_changed_files: GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+            current_branch="07-human-approval-pr",
+            warnings=[],
+        ),
+    )
     workflow = build_workflow()
 
     try:
@@ -366,6 +376,7 @@ def test_workflow_marks_reviewed_changes_approved_with_explicit_approval(
         assert result["publication_package"]["commit_message"] == "cli writes old value"
         assert result["publication_package"]["pr_title"] == "CLI writes old value"
         assert result["publication_package"]["changed_files"] == ["src/example.py"]
+        assert result["publication_package"]["git_safety"]["status"] == "safe"
         assert result["publication_package"]["next_action"] == "create_pull_request"
         assert result["run_summary"]["status"] == "approved"
         assert result["run_summary"]["next_action"] == "commit_changes"

@@ -27,6 +27,7 @@ from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
 from app.tools.filesystem import WorkspaceFileSystem
+from app.tools.git import inspect_git_safety
 from app.tools.github import GitHubClient
 from app.tools.patch import apply_change_set
 from app.tools.sandbox import run_tests_in_docker
@@ -269,11 +270,19 @@ def approval_gate_node(state: AgentState) -> AgentState:
 
 def prepare_publication_node(state: AgentState) -> AgentState:
     approval = ApprovalDecision.model_validate(state["approval_decision"])
+    changed_files = state.get("modified_files", [])
+    git_safety = None
+    if "workspace_path" in state:
+        git_safety = inspect_git_safety(
+            workspace_path=state["workspace_path"],
+            expected_changed_files=changed_files,
+        )
     package = PublicationPreparer().prepare(
         issue=state["issue"],
         approval=approval,
-        changed_files=state.get("modified_files", []),
+        changed_files=changed_files,
         issue_number=state.get("issue_number"),
+        git_safety=git_safety,
     )
     return {"publication_package": package.model_dump()}
 
