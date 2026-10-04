@@ -45,6 +45,16 @@ def _gemini_payload(text: str) -> dict[str, object]:
     }
 
 
+def _gemini_payload_with_usage(text: str) -> dict[str, object]:
+    payload = _gemini_payload(text)
+    payload["usageMetadata"] = {
+        "promptTokenCount": 11,
+        "candidatesTokenCount": 7,
+        "totalTokenCount": 18,
+    }
+    return payload
+
+
 def _response(status_code: int, payload: dict[str, object]) -> httpx.Response:
     return httpx.Response(
         status_code,
@@ -66,6 +76,21 @@ def test_get_llm_builds_gemini_provider_from_settings() -> None:
     assert isinstance(provider, GeminiLLMProvider)
 
 
+def test_get_llm_uses_role_specific_model_when_configured() -> None:
+    provider = get_llm(
+        "reviewer",
+        settings=Settings(
+            llm_provider="gemini",
+            llm_model="gemini-3.7-flash",
+            reviewer_model="gemini-3.7-pro",
+            gemini_api_key="test-key",
+        ),
+    )
+
+    assert isinstance(provider, GeminiLLMProvider)
+    assert provider._model == "gemini-3.7-pro"
+
+
 def test_settings_accepts_repo_pilot_env_aliases(monkeypatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("REPOPILOT_GEMINI_API_KEY", raising=False)
@@ -78,6 +103,20 @@ def test_settings_accepts_repo_pilot_env_aliases(monkeypatch) -> None:
     assert settings.llm_provider == "gemini"
     assert settings.llm_model == "gemini-3.7-pro"
     assert settings.gemini_api_key == "test-key"
+
+
+def test_settings_accepts_retry_and_cap_env_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("REPO_PILOT_LLM_MAX_RETRIES", "4")
+    monkeypatch.setenv("REPO_PILOT_LLM_MAX_OUTPUT_TOKENS", "2048")
+    monkeypatch.setenv("REPO_PILOT_LLM_MAX_PROMPT_CHARS", "9000")
+    monkeypatch.setenv("REPO_PILOT_REVIEWER_MODEL", "gemini-reviewer")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_max_retries == 4
+    assert settings.llm_max_output_tokens == 2048
+    assert settings.llm_max_prompt_chars == 9000
+    assert settings.reviewer_model == "gemini-reviewer"
 
 
 def test_get_llm_requires_gemini_api_key() -> None:
@@ -216,12 +255,156 @@ def test_gemini_provider_parses_structured_code_changes(monkeypatch) -> None:
     assert change_set.changes[0].path == "src/routes/login.py"
 
 
+def test_gemini_provider_retries_transient_http_failures(monkeypatch) -> None:
+    calls = []
+
+    def fake_post(url, params, json, timeout):
+        calls.append(json)
+        if len(calls) == 1:
+            return _response(503, {"error": {"message": "try again"}})
+        return _response(
+            200,
+            _gemini_payload(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        max_retries=1,
+        sleep=lambda delay: None,
+    )
+
+    analysis = provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    assert len(calls) == 2
+    assert analysis.risk_level == "medium"
+
+
+def test_gemini_provider_retries_malformed_json_with_repair_prompt(monkeypatch) -> None:
+    calls = []
+
+    def fake_post(url, params, json, timeout):
+        calls.append(json)
+        if len(calls) == 1:
+            return _response(200, _gemini_payload("not json"))
+        return _response(
+            200,
+            _gemini_payload(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        max_retries=1,
+        sleep=lambda delay: None,
+    )
+
+    analysis = provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    assert analysis.risk_level == "medium"
+    assert len(calls) == 2
+    repair_text = calls[1]["contents"][1]["parts"][0]["text"]
+    assert "corrected JSON only" in repair_text
+    assert "IssueAnalysis" in repair_text
+
+
+def test_gemini_provider_records_usage_metadata(monkeypatch) -> None:
+    def fake_post(url, params, json, timeout):
+        return _response(
+            200,
+            _gemini_payload_with_usage(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        role="analyzer",
+    )
+
+    provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    assert len(provider.usage_events) == 1
+    assert provider.usage_events[0].role == "analyzer"
+    assert provider.usage_events[0].prompt_tokens == 11
+    assert provider.usage_events[0].output_tokens == 7
+    assert provider.usage_events[0].total_tokens == 18
+
+
+def test_gemini_provider_applies_output_and_prompt_caps(monkeypatch) -> None:
+    captured = {}
+
+    def fake_post(url, params, json, timeout):
+        captured["json"] = json
+        return _response(
+            200,
+            _gemini_payload(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        max_output_tokens=123,
+        max_prompt_chars=250,
+    )
+
+    provider.analyze_issue("x" * 2000)
+
+    assert captured["json"]["generationConfig"]["maxOutputTokens"] == 123
+    prompt = captured["json"]["contents"][0]["parts"][0]["text"]
+    assert len(prompt) < 350
+    assert "truncated" in prompt
+
+
 def test_gemini_provider_rejects_malformed_json(monkeypatch) -> None:
     def fake_post(url, params, json, timeout):
         return _response(200, _gemini_payload("not json"))
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    provider = GeminiLLMProvider(api_key="test-key", model="gemini-3.7-flash")
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        max_retries=0,
+    )
 
     with pytest.raises(LLMProviderError, match="malformed JSON"):
         provider.propose_code_changes(

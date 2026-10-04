@@ -100,6 +100,49 @@ def test_workflow_summarizes_coder_provider_failure(monkeypatch) -> None:
     assert "code_changes" not in result
 
 
+def test_workflow_summarizes_reviewer_provider_failure(monkeypatch) -> None:
+    class FailingReviewerLLM(MockLLMProvider):
+        def review_changes(
+            self,
+            issue,
+            plan,
+            change_set,
+            diff,
+            test_analysis,
+            repair_attempts=0,
+        ):
+            raise LLMProviderError("Gemini returned JSON that does not match ReviewResult.")
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "get_llm", lambda role: FailingReviewerLLM())
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {
+            "issue": "Login endpoint returns 500 when email is missing.",
+            "run_tests": True,
+            "workspace_path": ".",
+        }
+    )
+
+    assert result["test_analysis"]["status"] == "passed"
+    assert result["llm_error"]["stage"] == "reviewer"
+    assert "ReviewResult" in result["llm_error"]["message"]
+    assert result["run_summary"]["status"] == "needs_human"
+    assert "review_result" not in result
+
+
 def test_github_issue_workflow_fetches_issue_and_repository_context(monkeypatch) -> None:
     class FakeGitHubClient:
         def get_issue(self, repo: str, issue_number: int) -> GitHubIssue:

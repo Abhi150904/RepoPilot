@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.agents.reviewer import Reviewer
 from app.schemas.code_change import CodeChangeSet, FileChange
-from app.schemas.execution import TestAnalysis as ExecutionAnalysis
+from app.schemas.execution import ReviewResult, TestAnalysis as ExecutionAnalysis
 from app.schemas.plan import ImplementationPlan
 
 
@@ -91,3 +91,55 @@ def test_reviewer_rejects_when_tests_did_not_pass() -> None:
 
     assert result.approved is False
     assert any(finding.category == "correctness" for finding in result.findings)
+
+
+def test_reviewer_can_delegate_to_model_backed_reasoning() -> None:
+    calls = {}
+
+    class FakeReviewerLLM:
+        def review_changes(
+            self,
+            issue,
+            plan,
+            change_set,
+            diff,
+            test_analysis,
+            repair_attempts=0,
+        ):
+            calls["issue"] = issue
+            calls["repair_attempts"] = repair_attempts
+            return ReviewResult(
+                approved=True,
+                summary="Model reviewer approved the tested patch.",
+                findings=[],
+                next_action="await_human_approval",
+            )
+
+    change_set = CodeChangeSet(
+        summary="Validate email.",
+        changes=[
+            FileChange(
+                path="src/routes/login.py",
+                action="modify",
+                explanation="Add validation",
+                proposed_content="email = payload.get('email')\n",
+            )
+        ],
+        diff="+email = payload.get('email')\n",
+    )
+
+    result = Reviewer(llm=FakeReviewerLLM()).review(
+        issue="Login endpoint returns 500 when email is missing",
+        plan=_plan(),
+        change_set=change_set,
+        diff=change_set.diff,
+        test_analysis=_passed_tests(),
+        repair_attempts=1,
+    )
+
+    assert result.approved is True
+    assert result.summary == "Model reviewer approved the tested patch."
+    assert calls == {
+        "issue": "Login endpoint returns 500 when email is missing",
+        "repair_attempts": 1,
+    }

@@ -96,6 +96,12 @@ def after_approval_gate_route(state: AgentState) -> str:
     return "end"
 
 
+def after_review_changes_route(state: AgentState) -> str:
+    if "llm_error" in state:
+        return "end"
+    return "approval_gate"
+
+
 def after_prepare_publication_route(state: AgentState) -> str:
     if state.get("publish_pr") or state.get("publish_push") or state.get("publish_local"):
         return "publish_local"
@@ -312,14 +318,22 @@ def review_changes_node(state: AgentState) -> AgentState:
     plan = ImplementationPlan.model_validate(state["plan"])
     change_set = CodeChangeSet.model_validate(state["code_changes"])
     test_analysis = TestAnalysis.model_validate(state["test_analysis"])
-    result = Reviewer().review(
-        issue=state["issue"],
-        plan=plan,
-        change_set=change_set,
-        diff=state.get("diff", ""),
-        test_analysis=test_analysis,
-        repair_attempts=state.get("repair_attempts", 0),
-    )
+    try:
+        llm = get_llm("reviewer")
+    except (LLMProviderError, ValueError) as exc:
+        return {"llm_error": _provider_error(stage="reviewer", exc=exc)}
+
+    try:
+        result = Reviewer(llm=llm).review(
+            issue=state["issue"],
+            plan=plan,
+            change_set=change_set,
+            diff=state.get("diff", ""),
+            test_analysis=test_analysis,
+            repair_attempts=state.get("repair_attempts", 0),
+        )
+    except LLMProviderError as exc:
+        return {"llm_error": _provider_error(stage="reviewer", exc=exc)}
     return {"review_result": result.model_dump()}
 
 
@@ -500,7 +514,14 @@ def build_workflow():
         },
     )
     graph.add_edge("prepare_repair", "load_target_files")
-    graph.add_edge("review_changes", "approval_gate")
+    graph.add_conditional_edges(
+        "review_changes",
+        after_review_changes_route,
+        {
+            "approval_gate": "approval_gate",
+            "end": "summarize_run",
+        },
+    )
     graph.add_conditional_edges(
         "approval_gate",
         after_approval_gate_route,
