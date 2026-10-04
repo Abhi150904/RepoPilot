@@ -196,3 +196,20 @@ def test_run_summarizer_marks_command_errors_as_needing_human_action() -> None:
     assert summary.status == "needs_human"
     assert summary.tests_passed is False
     assert summary.next_action == "rerun_tests"
+
+
+def test_run_summarizer_marks_llm_provider_errors_as_needing_human_action() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "llm_error": {
+                "stage": "coder",
+                "type": "LLMProviderError",
+                "message": "Gemini returned malformed JSON.",
+                "next_action": "inspect_failure",
+            }
+        }
+    )
+
+    assert summary.status == "needs_human"
+    assert "Gemini returned malformed JSON" in summary.summary
+    assert summary.next_action == "inspect_failure"

@@ -17,6 +17,7 @@ class AgentState(TypedDict, total=False):
     target_files: list[dict[str, object]]
     code_changes: dict[str, object]
     diff: str
+    llm_error: dict[str, object]
     apply_changes: bool
     workspace_path: str
     modified_files: list[str]

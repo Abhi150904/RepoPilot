@@ -3,9 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import json
 import re
+from typing import TypeVar
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings, get_settings
 from app.schemas.code_change import CodeChangeSet, FileChange, SourceFile
@@ -13,6 +14,8 @@ from app.schemas.execution import RepairContext
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class LLMProviderError(RuntimeError):
@@ -112,16 +115,15 @@ class GeminiLLMProvider(LLMProvider):
         self,
         api_key: str,
         model: str,
-        fallback: LLMProvider | None = None,
         timeout_seconds: float = 60.0,
     ) -> None:
         self._api_key = api_key
         self._model = model
-        self._fallback = fallback or MockLLMProvider()
         self._timeout_seconds = timeout_seconds
 
     def analyze_issue(self, issue: str) -> IssueAnalysis:
-        return self._fallback.analyze_issue(issue)
+        payload = _build_analysis_payload(issue=issue)
+        return self._generate_structured(payload=payload, schema=IssueAnalysis)
 
     def create_plan(
         self,
@@ -129,11 +131,12 @@ class GeminiLLMProvider(LLMProvider):
         analysis: IssueAnalysis,
         repository_context: RepositoryContext | None = None,
     ) -> ImplementationPlan:
-        return self._fallback.create_plan(
+        payload = _build_plan_payload(
             issue=issue,
             analysis=analysis,
             repository_context=repository_context,
         )
+        return self._generate_structured(payload=payload, schema=ImplementationPlan)
 
     def propose_code_changes(
         self,
@@ -150,6 +153,9 @@ class GeminiLLMProvider(LLMProvider):
             target_files=target_files,
             repair_context=repair_context,
         )
+        return self._generate_structured(payload=payload, schema=CodeChangeSet)
+
+    def _generate_structured(self, *, payload: dict[str, object], schema: type[T]) -> T:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self._model}:generateContent"
@@ -163,27 +169,38 @@ class GeminiLLMProvider(LLMProvider):
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise LLMProviderError(f"Gemini request failed: {exc}") from exc
+            raise LLMProviderError(_format_gemini_http_error(exc, self._model)) from exc
 
-        return _parse_gemini_change_set(response.json())
+        return _parse_gemini_structured_output(
+            payload=response.json(),
+            schema=schema,
+            schema_name=schema.__name__,
+        )
 
 
 def get_llm(role: str, settings: Settings | None = None) -> LLMProvider:
     config = settings or get_settings()
+    provider_name = config.llm_provider.strip().lower()
 
-    if config.llm_provider == "mock":
+    if provider_name == "mock":
         return MockLLMProvider()
-    if config.llm_provider == "gemini":
+    if provider_name == "gemini":
         if not config.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY is required when REPOPILOT_LLM_PROVIDER=gemini.")
+            raise ValueError(
+                "GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini."
+            )
+        if not config.llm_model.strip():
+            raise ValueError(
+                "REPO_PILOT_LLM_MODEL is required when REPO_PILOT_LLM_PROVIDER=gemini."
+            )
         return GeminiLLMProvider(
             api_key=config.gemini_api_key,
-            model=config.llm_model,
+            model=config.llm_model.strip(),
         )
 
     raise ValueError(
         f"Unsupported LLM provider '{config.llm_provider}' for role '{role}'. "
-        "This project currently supports REPOPILOT_LLM_PROVIDER=mock or gemini."
+        "This project currently supports REPO_PILOT_LLM_PROVIDER=mock or gemini."
     )
 
 
@@ -246,6 +263,62 @@ def _build_required_tests(issue: str) -> list[str]:
     ]
 
 
+PROMPT_VERSION = "2026-10-04"
+
+
+def _build_analysis_payload(issue: str) -> dict[str, object]:
+    return _build_gemini_json_payload(
+        role="analyzer",
+        task="Analyze a software issue for RepoPilot.",
+        rules=[
+            "Return JSON only.",
+            "Keep the analysis concise and implementation-oriented.",
+            "Set risk_level to low, medium, or high only.",
+            "Do not propose code changes in this step.",
+        ],
+        output_schema={
+            "summary": "short explanation of the reported issue",
+            "suspected_area": "likely codebase area involved",
+            "likely_cause": "probable cause of the behavior",
+            "risk_level": "low | medium | high",
+        },
+        context={
+            "issue": issue,
+        },
+    )
+
+
+def _build_plan_payload(
+    issue: str,
+    analysis: IssueAnalysis,
+    repository_context: RepositoryContext | None,
+) -> dict[str, object]:
+    return _build_gemini_json_payload(
+        role="planner",
+        task="Create a focused implementation plan for RepoPilot.",
+        rules=[
+            "Return JSON only.",
+            "Keep steps concrete and ordered.",
+            "Prefer repository paths from repository_context when provided.",
+            "Do not invent exact files when no repository context is available.",
+            "Include regression tests that would prove the issue is fixed.",
+        ],
+        output_schema={
+            "summary": "brief implementation strategy",
+            "steps": ["ordered implementation step"],
+            "files_to_inspect": ["repo path or specific code area"],
+            "tests_required": ["regression test to add or update"],
+        },
+        context={
+            "issue": issue,
+            "analysis": analysis.model_dump(),
+            "repository_context": (
+                repository_context.model_dump() if repository_context else None
+            ),
+        },
+    )
+
+
 def _build_gemini_payload(
     issue: str,
     analysis: IssueAnalysis,
@@ -253,9 +326,10 @@ def _build_gemini_payload(
     target_files: list[SourceFile],
     repair_context: RepairContext | None,
 ) -> dict[str, object]:
-    prompt = {
-        "task": "Return structured source-code changes for RepoPilot.",
-        "rules": [
+    return _build_gemini_json_payload(
+        role="coder",
+        task="Return structured source-code changes for RepoPilot.",
+        rules=[
             "Return JSON only.",
             "Do not return markdown fences.",
             "Do not return unified diffs.",
@@ -263,7 +337,7 @@ def _build_gemini_payload(
             "For modify actions, proposed_content must be the complete new file content.",
             "Do not omit unchanged parts of modified files.",
         ],
-        "output_schema": {
+        output_schema={
             "summary": "string",
             "changes": [
                 {
@@ -274,11 +348,31 @@ def _build_gemini_payload(
                 }
             ],
         },
-        "issue": issue,
-        "analysis": analysis.model_dump(),
-        "plan": plan.model_dump(),
-        "target_files": [file.model_dump() for file in target_files],
-        "repair_context": repair_context.model_dump() if repair_context else None,
+        context={
+            "issue": issue,
+            "analysis": analysis.model_dump(),
+            "plan": plan.model_dump(),
+            "target_files": [file.model_dump() for file in target_files],
+            "repair_context": repair_context.model_dump() if repair_context else None,
+        },
+    )
+
+
+def _build_gemini_json_payload(
+    *,
+    role: str,
+    task: str,
+    rules: list[str],
+    output_schema: dict[str, object],
+    context: dict[str, object],
+) -> dict[str, object]:
+    prompt = {
+        "prompt_version": PROMPT_VERSION,
+        "role": role,
+        "task": task,
+        "rules": rules,
+        "output_schema": output_schema,
+        "context": context,
     }
     return {
         "contents": [
@@ -298,7 +392,12 @@ def _build_gemini_payload(
     }
 
 
-def _parse_gemini_change_set(payload: dict[str, object]) -> CodeChangeSet:
+def _parse_gemini_structured_output(
+    *,
+    payload: dict[str, object],
+    schema: type[T],
+    schema_name: str,
+) -> T:
     text = _extract_gemini_text(payload)
     try:
         data = json.loads(_strip_json_fences(text))
@@ -306,9 +405,22 @@ def _parse_gemini_change_set(payload: dict[str, object]) -> CodeChangeSet:
         raise LLMProviderError("Gemini returned malformed JSON.") from exc
 
     try:
-        return CodeChangeSet.model_validate(data)
+        return schema.model_validate(data)
     except ValidationError as exc:
-        raise LLMProviderError("Gemini returned JSON that does not match CodeChangeSet.") from exc
+        raise LLMProviderError(
+            f"Gemini returned JSON that does not match {schema_name}."
+        ) from exc
+
+
+def _format_gemini_http_error(exc: httpx.HTTPError, model: str) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        response_text = exc.response.text.strip()
+        detail = f" Response body: {response_text[:500]}" if response_text else ""
+        return (
+            f"Gemini request failed for model '{model}' with "
+            f"{exc.response.status_code} {exc.response.reason_phrase}.{detail}"
+        )
+    return f"Gemini request failed for model '{model}': {exc}"
 
 
 def _extract_gemini_text(payload: dict[str, object]) -> str:
