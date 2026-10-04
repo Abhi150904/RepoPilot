@@ -36,6 +36,42 @@ class RepairContext(BaseModel):
     previous_diff: str = ""
 
 
+class LLMUsageEvent(BaseModel):
+    role: str
+    provider: str
+    model: str
+    prompt_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    duration_ms: float | None = None
+    success: bool = True
+    retry_count: int = 0
+    repair_attempt: int | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+
+
+class StageTiming(BaseModel):
+    stage: str
+    duration_ms: float
+    success: bool = True
+
+
+class RunMetrics(BaseModel):
+    llm_calls: list[LLMUsageEvent] = Field(default_factory=list)
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    llm_call_count: int = 0
+    retries: int = 0
+    repair_attempts: int = 0
+    total_runtime_ms: float | None = None
+    stage_timings: list[StageTiming] = Field(default_factory=list)
+    models_by_role: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class ReviewFinding(BaseModel):
     severity: Literal["info", "warning", "error"]
     category: Literal[
@@ -140,6 +176,7 @@ class RunSummary(BaseModel):
     summary: str
     tests_passed: bool | None = None
     repair_attempts: int = 0
+    metrics: RunMetrics | None = None
     next_action: Literal[
         "review_plan",
         "review_diff",

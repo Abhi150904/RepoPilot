@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.llm import LLMProvider
 from app.schemas.code_change import CodeChangeSet
 from app.schemas.execution import ReviewFinding, ReviewResult, TestAnalysis
 from app.schemas.plan import ImplementationPlan
@@ -7,6 +8,9 @@ from app.schemas.plan import ImplementationPlan
 
 class Reviewer:
     """Reviews a tested patch before human approval or publication."""
+
+    def __init__(self, llm: LLMProvider | None = None) -> None:
+        self._llm = llm
 
     def review(
         self,
@@ -17,6 +21,16 @@ class Reviewer:
         test_analysis: TestAnalysis,
         repair_attempts: int = 0,
     ) -> ReviewResult:
+        if self._llm is not None:
+            return self._llm.review_changes(
+                issue=issue,
+                plan=plan,
+                change_set=change_set,
+                diff=diff,
+                test_analysis=test_analysis,
+                repair_attempts=repair_attempts,
+            )
+
         findings = _collect_findings(
             issue=issue,
             plan=plan,

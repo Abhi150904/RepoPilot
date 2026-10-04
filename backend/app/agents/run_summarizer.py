@@ -5,6 +5,7 @@ from app.schemas.execution import (
     PublicationPackage,
     RepairDecision,
     ReviewResult,
+    RunMetrics,
     RunSummary,
     TestAnalysis,
 )
@@ -15,6 +16,7 @@ class RunSummarizer:
 
     def summarize(self, state: dict[str, object]) -> RunSummary:
         repair_attempts = int(state.get("repair_attempts", 0))
+        metrics = _run_metrics(state)
 
         if "llm_error" in state:
             error = state["llm_error"]
@@ -23,17 +25,23 @@ class RunSummarizer:
                 status="needs_human",
                 summary=f"LLM provider failed before the workflow could continue: {message}",
                 repair_attempts=repair_attempts,
+                metrics=metrics,
                 next_action="inspect_failure",
             )
 
         if "test_analysis" in state:
-            return _summarize_tested_run(state=state, repair_attempts=repair_attempts)
+            return _summarize_tested_run(
+                state=state,
+                repair_attempts=repair_attempts,
+                metrics=metrics,
+            )
 
         if state.get("modified_files"):
             return RunSummary(
                 status="changes_applied",
                 summary="Code changes were applied, but tests were not run.",
                 repair_attempts=repair_attempts,
+                metrics=metrics,
                 next_action="commit_changes",
             )
 
@@ -42,6 +50,7 @@ class RunSummarizer:
                 status="changes_proposed",
                 summary="Code changes were proposed but not applied or tested.",
                 repair_attempts=repair_attempts,
+                metrics=metrics,
                 next_action="review_diff",
             )
 
@@ -49,6 +58,7 @@ class RunSummarizer:
             status="planned_only",
             summary="The workflow produced analysis and a plan, but no concrete file changes.",
             repair_attempts=repair_attempts,
+            metrics=metrics,
             next_action="review_plan",
         )
 
@@ -56,6 +66,7 @@ class RunSummarizer:
 def _summarize_tested_run(
     state: dict[str, object],
     repair_attempts: int,
+    metrics: RunMetrics | None,
 ) -> RunSummary:
     analysis = TestAnalysis.model_validate(state["test_analysis"])
 
@@ -73,6 +84,7 @@ def _summarize_tested_run(
                                 summary="Tests passed, reviews approved the patch, and publication details are ready.",
                                 tests_passed=True,
                                 repair_attempts=repair_attempts,
+                                metrics=metrics,
                                 next_action="commit_changes",
                             )
                         return RunSummary(
@@ -80,6 +92,7 @@ def _summarize_tested_run(
                             summary="Tests passed, automated review approved the patch, and human approval was provided.",
                             tests_passed=True,
                             repair_attempts=repair_attempts,
+                            metrics=metrics,
                             next_action="commit_changes",
                         )
                 return RunSummary(
@@ -87,6 +100,7 @@ def _summarize_tested_run(
                     summary="Tests passed and automated review approved the patch.",
                     tests_passed=True,
                     repair_attempts=repair_attempts,
+                    metrics=metrics,
                     next_action="human_review",
                 )
             return RunSummary(
@@ -94,6 +108,7 @@ def _summarize_tested_run(
                 summary="Tests passed, but automated review found issues to address.",
                 tests_passed=True,
                 repair_attempts=repair_attempts,
+                metrics=metrics,
                 next_action="inspect_failure",
             )
         return RunSummary(
@@ -101,6 +116,7 @@ def _summarize_tested_run(
             summary=_passed_summary(repair_attempts),
             tests_passed=True,
             repair_attempts=repair_attempts,
+            metrics=metrics,
             next_action="review_diff",
         )
 
@@ -112,6 +128,7 @@ def _summarize_tested_run(
                 summary=f"Tests are still failing after {repair_attempts} repair attempt(s).",
                 tests_passed=False,
                 repair_attempts=repair_attempts,
+                metrics=metrics,
                 next_action="inspect_failure",
             )
         return RunSummary(
@@ -119,6 +136,7 @@ def _summarize_tested_run(
             summary="Tests failed and a repair pass is available.",
             tests_passed=False,
             repair_attempts=repair_attempts,
+            metrics=metrics,
             next_action="inspect_failure",
         )
 
@@ -128,6 +146,7 @@ def _summarize_tested_run(
             summary="The test command failed before producing a reliable test result.",
             tests_passed=False,
             repair_attempts=repair_attempts,
+            metrics=metrics,
             next_action="rerun_tests",
         )
 
@@ -136,6 +155,7 @@ def _summarize_tested_run(
         summary="The test command timed out and needs human inspection.",
         tests_passed=False,
         repair_attempts=repair_attempts,
+        metrics=metrics,
         next_action="human_review",
     )
 
@@ -161,3 +181,10 @@ def _llm_error_message(error: object) -> str:
     if isinstance(message, str) and message.strip():
         return message.strip()
     return "Unknown provider error."
+
+
+def _run_metrics(state: dict[str, object]) -> RunMetrics | None:
+    metrics = state.get("run_metrics")
+    if not isinstance(metrics, dict):
+        return None
+    return RunMetrics.model_validate(metrics)

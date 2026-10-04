@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.approval import ApprovalGate
@@ -13,16 +15,19 @@ from app.agents.repo_explorer import RepoExplorer
 from app.agents.reviewer import Reviewer
 from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
-from app.core.llm import LLMProviderError, get_llm
+from app.core.llm import LLMProviderError, MockLLMProvider, get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet, SourceFile
 from app.schemas.execution import (
     ApprovalDecision,
+    LLMUsageEvent,
     PublicationPackage,
     PublishResult,
     RepairContext,
     RepairDecision,
     ReviewResult,
+    RunMetrics,
+    StageTiming,
     TestAnalysis,
     TestResult,
 )
@@ -96,6 +101,12 @@ def after_approval_gate_route(state: AgentState) -> str:
     return "end"
 
 
+def after_review_changes_route(state: AgentState) -> str:
+    if "llm_error" in state:
+        return "end"
+    return "approval_gate"
+
+
 def after_prepare_publication_route(state: AgentState) -> str:
     if state.get("publish_pr") or state.get("publish_push") or state.get("publish_local"):
         return "publish_local"
@@ -130,30 +141,58 @@ def fetch_github_issue_node(state: AgentState) -> AgentState:
 
 
 def issue_analyzer_node(state: AgentState) -> AgentState:
+    started = time.perf_counter()
     issue = state["issue"]
+    llm = None
     try:
         llm = get_llm("analyzer")
     except (LLMProviderError, ValueError) as exc:
-        return {"llm_error": _provider_error(stage="analyzer", exc=exc)}
+        return _node_failure_update(
+            state=state,
+            stage="analyzer",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
 
     try:
         analyzer = IssueAnalyzer(llm=llm)
         analysis = analyzer.analyze(issue)
     except LLMProviderError as exc:
-        return {"llm_error": _provider_error(stage="analyzer", exc=exc)}
-    return {"analysis": analysis.model_dump()}
+        return _node_failure_update(
+            state=state,
+            stage="analyzer",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
+    return _node_success_update(
+        state=state,
+        stage="analyzer",
+        started=started,
+        llm=llm,
+        values={"analysis": analysis.model_dump()},
+    )
 
 
 def planner_node(state: AgentState) -> AgentState:
+    started = time.perf_counter()
     issue = state["issue"]
     analysis = IssueAnalysis.model_validate(state["analysis"])
     repository_context = None
     if "repository_context" in state:
         repository_context = RepositoryContext.model_validate(state["repository_context"])
+    llm = None
     try:
         llm = get_llm("planner")
     except (LLMProviderError, ValueError) as exc:
-        return {"llm_error": _provider_error(stage="planner", exc=exc)}
+        return _node_failure_update(
+            state=state,
+            stage="planner",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
 
     try:
         planner = Planner(llm=llm)
@@ -163,8 +202,20 @@ def planner_node(state: AgentState) -> AgentState:
             repository_context=repository_context,
         )
     except LLMProviderError as exc:
-        return {"llm_error": _provider_error(stage="planner", exc=exc)}
-    return {"plan": plan.model_dump()}
+        return _node_failure_update(
+            state=state,
+            stage="planner",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
+    return _node_success_update(
+        state=state,
+        stage="planner",
+        started=started,
+        llm=llm,
+        values={"plan": plan.model_dump()},
+    )
 
 
 def repo_explorer_node(state: AgentState) -> AgentState:
@@ -212,6 +263,7 @@ def load_target_files_node(state: AgentState) -> AgentState:
 
 
 def code_writer_node(state: AgentState) -> AgentState:
+    started = time.perf_counter()
     issue = state["issue"]
     analysis = IssueAnalysis.model_validate(state["analysis"])
     plan = ImplementationPlan.model_validate(state["plan"])
@@ -225,10 +277,17 @@ def code_writer_node(state: AgentState) -> AgentState:
     repair_context = None
     if "repair_context" in state:
         repair_context = RepairContext.model_validate(state["repair_context"])
+    llm = None
     try:
         llm = get_llm("coder")
     except (LLMProviderError, ValueError) as exc:
-        return {"llm_error": _provider_error(stage="coder", exc=exc)}
+        return _node_failure_update(
+            state=state,
+            stage="coder",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
 
     try:
         change_set = CodeWriter(llm=llm).propose_changes(
@@ -240,11 +299,23 @@ def code_writer_node(state: AgentState) -> AgentState:
             repair_context=repair_context,
         )
     except LLMProviderError as exc:
-        return {"llm_error": _provider_error(stage="coder", exc=exc)}
-    return {
-        "code_changes": change_set.model_dump(),
-        "diff": change_set.diff,
-    }
+        return _node_failure_update(
+            state=state,
+            stage="coder",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
+    return _node_success_update(
+        state=state,
+        stage="coder",
+        started=started,
+        llm=llm,
+        values={
+            "code_changes": change_set.model_dump(),
+            "diff": change_set.diff,
+        },
+    )
 
 
 def apply_code_changes_node(state: AgentState) -> AgentState:
@@ -309,18 +380,47 @@ def prepare_repair_node(state: AgentState) -> AgentState:
 
 
 def review_changes_node(state: AgentState) -> AgentState:
+    started = time.perf_counter()
     plan = ImplementationPlan.model_validate(state["plan"])
     change_set = CodeChangeSet.model_validate(state["code_changes"])
     test_analysis = TestAnalysis.model_validate(state["test_analysis"])
-    result = Reviewer().review(
-        issue=state["issue"],
-        plan=plan,
-        change_set=change_set,
-        diff=state.get("diff", ""),
-        test_analysis=test_analysis,
-        repair_attempts=state.get("repair_attempts", 0),
+    llm = None
+    try:
+        llm = get_llm("reviewer")
+    except (LLMProviderError, ValueError) as exc:
+        return _node_failure_update(
+            state=state,
+            stage="reviewer",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
+
+    try:
+        reviewer = Reviewer() if isinstance(llm, MockLLMProvider) else Reviewer(llm=llm)
+        result = reviewer.review(
+            issue=state["issue"],
+            plan=plan,
+            change_set=change_set,
+            diff=state.get("diff", ""),
+            test_analysis=test_analysis,
+            repair_attempts=state.get("repair_attempts", 0),
+        )
+    except LLMProviderError as exc:
+        return _node_failure_update(
+            state=state,
+            stage="reviewer",
+            started=started,
+            llm=llm,
+            exc=exc,
+        )
+    return _node_success_update(
+        state=state,
+        stage="reviewer",
+        started=started,
+        llm=llm,
+        values={"review_result": result.model_dump()},
     )
-    return {"review_result": result.model_dump()}
 
 
 def approval_gate_node(state: AgentState) -> AgentState:
@@ -391,6 +491,11 @@ def summarize_run_node(state: AgentState) -> AgentState:
     return {"run_summary": summary.model_dump()}
 
 
+def collect_run_metrics_node(state: AgentState) -> AgentState:
+    metrics = _build_run_metrics(state)
+    return {"run_metrics": metrics.model_dump()}
+
+
 def _provider_error(stage: str, exc: Exception) -> dict[str, object]:
     return {
         "stage": stage,
@@ -398,6 +503,132 @@ def _provider_error(stage: str, exc: Exception) -> dict[str, object]:
         "message": str(exc),
         "next_action": "inspect_failure",
     }
+
+
+def _node_success_update(
+    *,
+    state: AgentState,
+    stage: str,
+    started: float,
+    llm: object,
+    values: dict[str, object],
+) -> AgentState:
+    return {
+        **values,
+        "llm_usage": _append_llm_usage(
+            state=state,
+            llm=llm,
+            repair_attempt=state.get("repair_attempts"),
+        ),
+        "stage_timings": _append_stage_timing(
+            state=state,
+            stage=stage,
+            started=started,
+            success=True,
+        ),
+    }
+
+
+def _node_failure_update(
+    *,
+    state: AgentState,
+    stage: str,
+    started: float,
+    llm: object,
+    exc: Exception,
+) -> AgentState:
+    return {
+        "llm_error": _provider_error(stage=stage, exc=exc),
+        "llm_usage": _append_llm_usage(
+            state=state,
+            llm=llm,
+            repair_attempt=state.get("repair_attempts"),
+        ),
+        "stage_timings": _append_stage_timing(
+            state=state,
+            stage=stage,
+            started=started,
+            success=False,
+        ),
+    }
+
+
+def _append_llm_usage(
+    *,
+    state: AgentState,
+    llm: object,
+    repair_attempt: int | None,
+) -> list[dict[str, object]]:
+    usage = list(state.get("llm_usage", []))
+    events = getattr(llm, "usage_events", [])
+    for event in events:
+        if isinstance(event, LLMUsageEvent):
+            data = event.model_dump()
+        elif hasattr(event, "model_dump"):
+            data = event.model_dump()
+        elif isinstance(event, dict):
+            data = dict(event)
+        else:
+            continue
+        if repair_attempt is not None and data.get("role") == "coder":
+            data["repair_attempt"] = repair_attempt
+        usage.append(data)
+    return usage
+
+
+def _append_stage_timing(
+    *,
+    state: AgentState,
+    stage: str,
+    started: float,
+    success: bool,
+) -> list[dict[str, object]]:
+    timings = list(state.get("stage_timings", []))
+    timings.append(
+        StageTiming(
+            stage=stage,
+            duration_ms=round((time.perf_counter() - started) * 1000, 4),
+            success=success,
+        ).model_dump()
+    )
+    return timings
+
+
+def _build_run_metrics(state: AgentState) -> RunMetrics:
+    llm_calls = [
+        LLMUsageEvent.model_validate(event)
+        for event in state.get("llm_usage", [])
+    ]
+    stage_timings = [
+        StageTiming.model_validate(timing)
+        for timing in state.get("stage_timings", [])
+    ]
+    cost_values = [
+        call.estimated_cost_usd
+        for call in llm_calls
+        if call.estimated_cost_usd is not None
+    ]
+    models_by_role: dict[str, list[str]] = {}
+    for call in llm_calls:
+        models = models_by_role.setdefault(call.role, [])
+        if call.model not in models:
+            models.append(call.model)
+    return RunMetrics(
+        llm_calls=llm_calls,
+        prompt_tokens=sum(call.prompt_tokens or 0 for call in llm_calls),
+        output_tokens=sum(call.output_tokens or 0 for call in llm_calls),
+        total_tokens=sum(call.total_tokens or 0 for call in llm_calls),
+        estimated_cost_usd=round(sum(cost_values), 6) if cost_values else None,
+        llm_call_count=len(llm_calls),
+        retries=sum(call.retry_count for call in llm_calls),
+        repair_attempts=int(state.get("repair_attempts", 0)),
+        total_runtime_ms=round(
+            sum(timing.duration_ms for timing in stage_timings),
+            4,
+        ),
+        stage_timings=stage_timings,
+        models_by_role=models_by_role,
+    )
 
 
 def _select_target_paths(
@@ -441,6 +672,7 @@ def build_workflow():
     graph.add_node("publish_local", publish_local_node)
     graph.add_node("publish_push", publish_push_node)
     graph.add_node("publish_pr", publish_pr_node)
+    graph.add_node("collect_run_metrics", collect_run_metrics_node)
     graph.add_node("summarize_run", summarize_run_node)
 
     graph.add_conditional_edges(
@@ -458,7 +690,7 @@ def build_workflow():
         {
             "repo_explorer": "repo_explorer",
             "planner": "planner",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_edge("repo_explorer", "planner")
@@ -467,7 +699,7 @@ def build_workflow():
         after_planner_route,
         {
             "load_target_files": "load_target_files",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_edge("load_target_files", "code_writer")
@@ -477,7 +709,7 @@ def build_workflow():
         {
             "apply_code_changes": "apply_code_changes",
             "run_tests": "run_tests",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_conditional_edges(
@@ -485,7 +717,7 @@ def build_workflow():
         after_apply_changes_route,
         {
             "run_tests": "run_tests",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_edge("run_tests", "analyze_tests")
@@ -496,17 +728,24 @@ def build_workflow():
         {
             "prepare_repair": "prepare_repair",
             "review_changes": "review_changes",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_edge("prepare_repair", "load_target_files")
-    graph.add_edge("review_changes", "approval_gate")
+    graph.add_conditional_edges(
+        "review_changes",
+        after_review_changes_route,
+        {
+            "approval_gate": "approval_gate",
+            "end": "collect_run_metrics",
+        },
+    )
     graph.add_conditional_edges(
         "approval_gate",
         after_approval_gate_route,
         {
             "prepare_publication": "prepare_publication",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_conditional_edges(
@@ -515,7 +754,7 @@ def build_workflow():
         {
             "publish_local": "publish_local",
             "publish_dry_run": "publish_dry_run",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_conditional_edges(
@@ -523,7 +762,7 @@ def build_workflow():
         after_publish_local_route,
         {
             "publish_push": "publish_push",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
     graph.add_conditional_edges(
@@ -531,11 +770,12 @@ def build_workflow():
         after_publish_push_route,
         {
             "publish_pr": "publish_pr",
-            "end": "summarize_run",
+            "end": "collect_run_metrics",
         },
     )
-    graph.add_edge("publish_pr", "summarize_run")
-    graph.add_edge("publish_dry_run", "summarize_run")
+    graph.add_edge("publish_pr", "collect_run_metrics")
+    graph.add_edge("publish_dry_run", "collect_run_metrics")
+    graph.add_edge("collect_run_metrics", "summarize_run")
     graph.add_edge("summarize_run", END)
 
     return graph.compile()

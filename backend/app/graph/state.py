@@ -18,6 +18,9 @@ class AgentState(TypedDict, total=False):
     code_changes: dict[str, object]
     diff: str
     llm_error: dict[str, object]
+    llm_usage: list[dict[str, object]]
+    stage_timings: list[dict[str, object]]
+    run_metrics: dict[str, object]
     apply_changes: bool
     workspace_path: str
     modified_files: list[str]

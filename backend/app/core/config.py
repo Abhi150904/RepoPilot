@@ -20,6 +20,55 @@ class Settings(BaseSettings):
             "GEMINI_MODEL",
         ),
     )
+    analyzer_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_ANALYZER_MODEL",
+            "REPOPILOT_ANALYZER_MODEL",
+        ),
+    )
+    planner_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_PLANNER_MODEL",
+            "REPOPILOT_PLANNER_MODEL",
+        ),
+    )
+    coder_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_CODER_MODEL",
+            "REPOPILOT_CODER_MODEL",
+        ),
+    )
+    reviewer_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_REVIEWER_MODEL",
+            "REPOPILOT_REVIEWER_MODEL",
+        ),
+    )
+    llm_max_output_tokens: int = Field(
+        default=8192,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_LLM_MAX_OUTPUT_TOKENS",
+            "REPOPILOT_LLM_MAX_OUTPUT_TOKENS",
+        ),
+    )
+    llm_max_prompt_chars: int = Field(
+        default=120_000,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_LLM_MAX_PROMPT_CHARS",
+            "REPOPILOT_LLM_MAX_PROMPT_CHARS",
+        ),
+    )
+    llm_max_retries: int = Field(
+        default=2,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_LLM_MAX_RETRIES",
+            "REPOPILOT_LLM_MAX_RETRIES",
+        ),
+    )
     gemini_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
