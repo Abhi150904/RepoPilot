@@ -13,7 +13,7 @@ from app.agents.repo_explorer import RepoExplorer
 from app.agents.reviewer import Reviewer
 from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
-from app.core.llm import get_llm
+from app.core.llm import LLMProviderError, get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet, SourceFile
 from app.schemas.execution import (
@@ -43,12 +43,22 @@ def start_route(state: AgentState) -> str:
 
 
 def after_analyzer_route(state: AgentState) -> str:
+    if "llm_error" in state:
+        return "end"
     if "repository" in state:
         return "repo_explorer"
     return "planner"
 
 
+def after_planner_route(state: AgentState) -> str:
+    if "llm_error" in state:
+        return "end"
+    return "load_target_files"
+
+
 def after_code_writer_route(state: AgentState) -> str:
+    if "llm_error" in state:
+        return "end"
     if state.get("apply_changes"):
         return "apply_code_changes"
     if state.get("run_tests"):
@@ -121,8 +131,16 @@ def fetch_github_issue_node(state: AgentState) -> AgentState:
 
 def issue_analyzer_node(state: AgentState) -> AgentState:
     issue = state["issue"]
-    analyzer = IssueAnalyzer(llm=get_llm("analyzer"))
-    analysis = analyzer.analyze(issue)
+    try:
+        llm = get_llm("analyzer")
+    except (LLMProviderError, ValueError) as exc:
+        return {"llm_error": _provider_error(stage="analyzer", exc=exc)}
+
+    try:
+        analyzer = IssueAnalyzer(llm=llm)
+        analysis = analyzer.analyze(issue)
+    except LLMProviderError as exc:
+        return {"llm_error": _provider_error(stage="analyzer", exc=exc)}
     return {"analysis": analysis.model_dump()}
 
 
@@ -132,12 +150,20 @@ def planner_node(state: AgentState) -> AgentState:
     repository_context = None
     if "repository_context" in state:
         repository_context = RepositoryContext.model_validate(state["repository_context"])
-    planner = Planner(llm=get_llm("planner"))
-    plan = planner.create_plan(
-        issue=issue,
-        analysis=analysis,
-        repository_context=repository_context,
-    )
+    try:
+        llm = get_llm("planner")
+    except (LLMProviderError, ValueError) as exc:
+        return {"llm_error": _provider_error(stage="planner", exc=exc)}
+
+    try:
+        planner = Planner(llm=llm)
+        plan = planner.create_plan(
+            issue=issue,
+            analysis=analysis,
+            repository_context=repository_context,
+        )
+    except LLMProviderError as exc:
+        return {"llm_error": _provider_error(stage="planner", exc=exc)}
     return {"plan": plan.model_dump()}
 
 
@@ -199,14 +225,22 @@ def code_writer_node(state: AgentState) -> AgentState:
     repair_context = None
     if "repair_context" in state:
         repair_context = RepairContext.model_validate(state["repair_context"])
-    change_set = CodeWriter(llm=get_llm("coder")).propose_changes(
-        issue=issue,
-        analysis=analysis,
-        plan=plan,
-        target_files=target_files,
-        repository_context=repository_context,
-        repair_context=repair_context,
-    )
+    try:
+        llm = get_llm("coder")
+    except (LLMProviderError, ValueError) as exc:
+        return {"llm_error": _provider_error(stage="coder", exc=exc)}
+
+    try:
+        change_set = CodeWriter(llm=llm).propose_changes(
+            issue=issue,
+            analysis=analysis,
+            plan=plan,
+            target_files=target_files,
+            repository_context=repository_context,
+            repair_context=repair_context,
+        )
+    except LLMProviderError as exc:
+        return {"llm_error": _provider_error(stage="coder", exc=exc)}
     return {
         "code_changes": change_set.model_dump(),
         "diff": change_set.diff,
@@ -357,6 +391,15 @@ def summarize_run_node(state: AgentState) -> AgentState:
     return {"run_summary": summary.model_dump()}
 
 
+def _provider_error(stage: str, exc: Exception) -> dict[str, object]:
+    return {
+        "stage": stage,
+        "type": exc.__class__.__name__,
+        "message": str(exc),
+        "next_action": "inspect_failure",
+    }
+
+
 def _select_target_paths(
     plan: ImplementationPlan,
     repository_context: RepositoryContext | None,
@@ -415,10 +458,18 @@ def build_workflow():
         {
             "repo_explorer": "repo_explorer",
             "planner": "planner",
+            "end": "summarize_run",
         },
     )
     graph.add_edge("repo_explorer", "planner")
-    graph.add_edge("planner", "load_target_files")
+    graph.add_conditional_edges(
+        "planner",
+        after_planner_route,
+        {
+            "load_target_files": "load_target_files",
+            "end": "summarize_run",
+        },
+    )
     graph.add_edge("load_target_files", "code_writer")
     graph.add_conditional_edges(
         "code_writer",

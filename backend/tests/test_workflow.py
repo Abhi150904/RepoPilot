@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.llm import MockLLMProvider
+from app.core.llm import LLMProviderError, MockLLMProvider
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
 from app.schemas.execution import GitSafetyReport, PublishResult, TestResult as ExecutionResult
@@ -47,6 +47,57 @@ def test_version_zero_workflow_produces_analysis_and_plan() -> None:
     assert result["plan"]["tests_required"]
     assert result["run_summary"]["status"] == "planned_only"
     assert "modified_files" not in result
+
+
+def test_workflow_summarizes_analyzer_provider_failure(monkeypatch) -> None:
+    import app.graph.workflow as workflow_module
+
+    def failing_get_llm(role):
+        raise LLMProviderError("Gemini returned malformed JSON.")
+
+    monkeypatch.setattr(workflow_module, "get_llm", failing_get_llm)
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {"issue": "Login endpoint returns 500 when email is missing."}
+    )
+
+    assert result["llm_error"]["stage"] == "analyzer"
+    assert result["llm_error"]["type"] == "LLMProviderError"
+    assert "malformed JSON" in result["llm_error"]["message"]
+    assert result["run_summary"]["status"] == "needs_human"
+    assert result["run_summary"]["next_action"] == "inspect_failure"
+    assert "analysis" not in result
+
+
+def test_workflow_summarizes_coder_provider_failure(monkeypatch) -> None:
+    class FailingCoderLLM(MockLLMProvider):
+        def propose_code_changes(
+            self,
+            issue,
+            analysis,
+            plan,
+            target_files,
+            repair_context=None,
+        ):
+            raise LLMProviderError("Gemini returned JSON that does not match CodeChangeSet.")
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "get_llm", lambda role: FailingCoderLLM())
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {"issue": "Login endpoint returns 500 when email is missing."}
+    )
+
+    assert result["analysis"]
+    assert result["plan"]
+    assert result["llm_error"]["stage"] == "coder"
+    assert "CodeChangeSet" in result["llm_error"]["message"]
+    assert result["run_summary"]["status"] == "needs_human"
+    assert result["run_summary"]["next_action"] == "inspect_failure"
+    assert "code_changes" not in result
 
 
 def test_github_issue_workflow_fetches_issue_and_repository_context(monkeypatch) -> None:

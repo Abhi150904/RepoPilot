@@ -16,6 +16,16 @@ class RunSummarizer:
     def summarize(self, state: dict[str, object]) -> RunSummary:
         repair_attempts = int(state.get("repair_attempts", 0))
 
+        if "llm_error" in state:
+            error = state["llm_error"]
+            message = _llm_error_message(error)
+            return RunSummary(
+                status="needs_human",
+                summary=f"LLM provider failed before the workflow could continue: {message}",
+                repair_attempts=repair_attempts,
+                next_action="inspect_failure",
+            )
+
         if "test_analysis" in state:
             return _summarize_tested_run(state=state, repair_attempts=repair_attempts)
 
@@ -142,3 +152,12 @@ def _has_proposed_changes(state: dict[str, object]) -> bool:
         return False
     changes = code_changes.get("changes")
     return isinstance(changes, list) and bool(changes)
+
+
+def _llm_error_message(error: object) -> str:
+    if not isinstance(error, dict):
+        return "Unknown provider error."
+    message = error.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return "Unknown provider error."

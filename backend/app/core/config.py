@@ -5,11 +5,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    llm_provider: str = "mock"
-    llm_model: str = "repopilot-mock-v0"
+    llm_provider: str = Field(
+        default="mock",
+        validation_alias=AliasChoices(
+            "REPO_PILOT_LLM_PROVIDER",
+            "REPOPILOT_LLM_PROVIDER",
+        ),
+    )
+    llm_model: str = Field(
+        default="repopilot-mock-v0",
+        validation_alias=AliasChoices(
+            "REPO_PILOT_LLM_MODEL",
+            "REPOPILOT_LLM_MODEL",
+            "GEMINI_MODEL",
+        ),
+    )
     gemini_api_key: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("GEMINI_API_KEY", "REPOPILOT_GEMINI_API_KEY"),
+        validation_alias=AliasChoices(
+            "GEMINI_API_KEY",
+            "REPO_PILOT_GEMINI_API_KEY",
+            "REPOPILOT_GEMINI_API_KEY",
+        ),
     )
     github_token: str | None = Field(
         default=None,
@@ -20,6 +37,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="REPOPILOT_",
         extra="ignore",
+        populate_by_name=True,
     )
 
 
