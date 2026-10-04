@@ -15,7 +15,7 @@ from app.agents.repo_explorer import RepoExplorer
 from app.agents.reviewer import Reviewer
 from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
-from app.core.llm import LLMProviderError, get_llm
+from app.core.llm import LLMProviderError, MockLLMProvider, get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet, SourceFile
 from app.schemas.execution import (
@@ -397,7 +397,8 @@ def review_changes_node(state: AgentState) -> AgentState:
         )
 
     try:
-        result = Reviewer(llm=llm).review(
+        reviewer = Reviewer() if isinstance(llm, MockLLMProvider) else Reviewer(llm=llm)
+        result = reviewer.review(
             issue=state["issue"],
             plan=plan,
             change_set=change_set,

@@ -210,7 +210,33 @@ def test_workflow_summarizes_coder_provider_failure(monkeypatch) -> None:
 
 
 def test_workflow_summarizes_reviewer_provider_failure(monkeypatch) -> None:
-    class FailingReviewerLLM(MockLLMProvider):
+    class FailingReviewerLLM:
+        @property
+        def usage_events(self):
+            return []
+
+        def analyze_issue(self, issue):
+            return MockLLMProvider().analyze_issue(issue)
+
+        def create_plan(self, issue, analysis, repository_context=None):
+            return MockLLMProvider().create_plan(issue, analysis, repository_context)
+
+        def propose_code_changes(
+            self,
+            issue,
+            analysis,
+            plan,
+            target_files,
+            repair_context=None,
+        ):
+            return MockLLMProvider().propose_code_changes(
+                issue,
+                analysis,
+                plan,
+                target_files,
+                repair_context,
+            )
+
         def review_changes(
             self,
             issue,
@@ -250,6 +276,46 @@ def test_workflow_summarizes_reviewer_provider_failure(monkeypatch) -> None:
     assert "ReviewResult" in result["llm_error"]["message"]
     assert result["run_summary"]["status"] == "needs_human"
     assert "review_result" not in result
+
+
+def test_workflow_uses_deterministic_reviewer_when_provider_is_mock(monkeypatch) -> None:
+    class PoisonedMockReviewerLLM(MockLLMProvider):
+        def review_changes(
+            self,
+            issue,
+            plan,
+            change_set,
+            diff,
+            test_analysis,
+            repair_attempts=0,
+        ):
+            raise AssertionError("Mock provider reviewer should not be used by workflow.")
+
+    def fake_run_tests_in_docker(workspace_path, command):
+        return ExecutionResult(
+            exit_code=0,
+            passed=1,
+            failed=0,
+            stdout="===== 1 passed in 0.10s =====",
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "get_llm", lambda role: PoisonedMockReviewerLLM())
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", fake_run_tests_in_docker)
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {
+            "issue": "Login endpoint returns 500 when email is missing.",
+            "run_tests": True,
+            "workspace_path": ".",
+        }
+    )
+
+    assert result["review_result"]["approved"] is False
+    assert result["run_summary"]["status"] == "review_failed"
 
 
 def test_github_issue_workflow_fetches_issue_and_repository_context(monkeypatch) -> None:
