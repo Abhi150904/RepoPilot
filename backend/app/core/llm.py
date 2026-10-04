@@ -12,7 +12,13 @@ from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings, get_settings
 from app.schemas.code_change import CodeChangeSet, FileChange, SourceFile
-from app.schemas.execution import RepairContext, ReviewFinding, ReviewResult, TestAnalysis
+from app.schemas.execution import (
+    LLMUsageEvent,
+    RepairContext,
+    ReviewFinding,
+    ReviewResult,
+    TestAnalysis,
+)
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryContext
@@ -22,16 +28,6 @@ T = TypeVar("T", bound=BaseModel)
 
 class LLMProviderError(RuntimeError):
     """Raised when a model provider cannot produce valid structured output."""
-
-
-class LLMUsage(BaseModel):
-    provider: str
-    model: str
-    role: str
-    prompt_tokens: int | None = None
-    output_tokens: int | None = None
-    total_tokens: int | None = None
-    estimated_cost_usd: float | None = None
 
 
 class LLMProvider(ABC):
@@ -200,10 +196,10 @@ class GeminiLLMProvider(LLMProvider):
         self._max_output_tokens = max_output_tokens
         self._max_prompt_chars = max_prompt_chars
         self._sleep = sleep
-        self._usage_events: list[LLMUsage] = []
+        self._usage_events: list[LLMUsageEvent] = []
 
     @property
-    def usage_events(self) -> list[LLMUsage]:
+    def usage_events(self) -> list[LLMUsageEvent]:
         return list(self._usage_events)
 
     def analyze_issue(self, issue: str) -> IssueAnalysis:
@@ -260,6 +256,9 @@ class GeminiLLMProvider(LLMProvider):
         return self._generate_structured(payload=payload, schema=ReviewResult)
 
     def _generate_structured(self, *, payload: dict[str, object], schema: type[T]) -> T:
+        started = time.perf_counter()
+        retry_count = 0
+        usage_totals = _empty_usage_totals()
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self._model}:generateContent"
@@ -272,18 +271,46 @@ class GeminiLLMProvider(LLMProvider):
         last_parse_error: LLMProviderError | None = None
 
         for attempt in range(self._max_retries + 1):
-            response = self._post_with_retries(url=url, payload=request_payload)
-            self._record_usage(response.json())
             try:
-                return _parse_gemini_structured_output(
+                response, http_retries = self._post_with_retries(
+                    url=url,
+                    payload=request_payload,
+                )
+            except LLMProviderError as exc:
+                duration_ms = _duration_ms(started)
+                self._record_usage_event(
+                    usage_totals=usage_totals,
+                    duration_ms=duration_ms,
+                    success=False,
+                    retry_count=retry_count,
+                    error=exc,
+                )
+                raise
+
+            retry_count += http_retries
+            usage_totals = _merge_usage_totals(
+                usage_totals,
+                _extract_gemini_usage_totals(response.json()),
+            )
+            try:
+                parsed = _parse_gemini_structured_output(
                     payload=response.json(),
                     schema=schema,
                     schema_name=schema.__name__,
                 )
+                self._record_usage_event(
+                    usage_totals=usage_totals,
+                    duration_ms=_duration_ms(started),
+                    success=True,
+                    retry_count=retry_count,
+                    error=None,
+                )
+                return parsed
             except LLMProviderError as exc:
                 last_parse_error = exc
                 if attempt >= self._max_retries:
                     break
+                retry_count += 1
                 request_payload = _build_schema_repair_payload(
                     original_payload=request_payload,
                     schema_name=schema.__name__,
@@ -291,9 +318,21 @@ class GeminiLLMProvider(LLMProvider):
                 )
 
         assert last_parse_error is not None
+        self._record_usage_event(
+            usage_totals=usage_totals,
+            duration_ms=_duration_ms(started),
+            success=False,
+            retry_count=retry_count,
+            error=last_parse_error,
+        )
         raise last_parse_error
 
-    def _post_with_retries(self, *, url: str, payload: dict[str, object]) -> httpx.Response:
+    def _post_with_retries(
+        self,
+        *,
+        url: str,
+        payload: dict[str, object],
+    ) -> tuple[httpx.Response, int]:
         last_error: httpx.HTTPError | None = None
         for attempt in range(self._max_retries + 1):
             try:
@@ -304,7 +343,7 @@ class GeminiLLMProvider(LLMProvider):
                     timeout=self._timeout_seconds,
                 )
                 response.raise_for_status()
-                return response
+                return response, attempt
             except httpx.HTTPError as exc:
                 last_error = exc
                 if attempt >= self._max_retries or not _is_retryable_http_error(exc):
@@ -316,14 +355,31 @@ class GeminiLLMProvider(LLMProvider):
         assert last_error is not None
         raise LLMProviderError(_format_gemini_http_error(last_error, self._model)) from last_error
 
-    def _record_usage(self, payload: dict[str, object]) -> None:
-        usage = _extract_gemini_usage(
-            payload=payload,
-            model=self._model,
-            role=self._role,
+    def _record_usage_event(
+        self,
+        *,
+        usage_totals: dict[str, int | None],
+        duration_ms: float,
+        success: bool,
+        retry_count: int,
+        error: Exception | None,
+    ) -> None:
+        self._usage_events.append(
+            LLMUsageEvent(
+                provider="gemini",
+                model=self._model,
+                role=self._role,
+                prompt_tokens=usage_totals["prompt_tokens"],
+                output_tokens=usage_totals["output_tokens"],
+                total_tokens=usage_totals["total_tokens"],
+                estimated_cost_usd=None,
+                duration_ms=duration_ms,
+                success=success,
+                retry_count=retry_count,
+                error_type=error.__class__.__name__ if error else None,
+                error_message=str(error) if error else None,
+            )
         )
-        if usage is not None:
-            self._usage_events.append(usage)
 
 
 def get_llm(role: str, settings: Settings | None = None) -> LLMProvider:
@@ -696,28 +752,49 @@ def _build_schema_repair_payload(
     return repaired
 
 
-def _extract_gemini_usage(
-    *,
-    payload: dict[str, object],
-    model: str,
-    role: str,
-) -> LLMUsage | None:
+def _extract_gemini_usage_totals(payload: dict[str, object]) -> dict[str, int | None]:
     usage = payload.get("usageMetadata")
     if not isinstance(usage, dict):
-        return None
-    return LLMUsage(
-        provider="gemini",
-        model=model,
-        role=role,
-        prompt_tokens=_optional_int(usage.get("promptTokenCount")),
-        output_tokens=_optional_int(usage.get("candidatesTokenCount")),
-        total_tokens=_optional_int(usage.get("totalTokenCount")),
-        estimated_cost_usd=None,
-    )
+        return _empty_usage_totals()
+    return {
+        "prompt_tokens": _optional_int(usage.get("promptTokenCount")),
+        "output_tokens": _optional_int(usage.get("candidatesTokenCount")),
+        "total_tokens": _optional_int(usage.get("totalTokenCount")),
+    }
+
+
+def _empty_usage_totals() -> dict[str, int | None]:
+    return {
+        "prompt_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+    }
+
+
+def _merge_usage_totals(
+    left: dict[str, int | None],
+    right: dict[str, int | None],
+) -> dict[str, int | None]:
+    return {
+        key: _sum_optional_ints(left.get(key), right.get(key))
+        for key in ("prompt_tokens", "output_tokens", "total_tokens")
+    }
+
+
+def _sum_optional_ints(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
 
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _duration_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 4)
 
 
 def _repair_context_for_prompt(repair_context: RepairContext | None) -> dict[str, object] | None:

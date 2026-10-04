@@ -213,3 +213,46 @@ def test_run_summarizer_marks_llm_provider_errors_as_needing_human_action() -> N
     assert summary.status == "needs_human"
     assert "Gemini returned malformed JSON" in summary.summary
     assert summary.next_action == "inspect_failure"
+
+
+def test_run_summarizer_includes_compact_run_metrics() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "run_metrics": {
+                "llm_calls": [
+                    {
+                        "role": "analyzer",
+                        "provider": "gemini",
+                        "model": "gemini-3.7-pro",
+                        "prompt_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "duration_ms": 12.5,
+                        "success": True,
+                        "retry_count": 0,
+                    }
+                ],
+                "prompt_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "llm_call_count": 1,
+                "retries": 0,
+                "repair_attempts": 0,
+                "total_runtime_ms": 12.5,
+                "stage_timings": [
+                    {
+                        "stage": "analyzer",
+                        "duration_ms": 12.5,
+                        "success": True,
+                    }
+                ],
+                "models_by_role": {"analyzer": ["gemini-3.7-pro"]},
+            }
+        }
+    )
+
+    assert summary.status == "planned_only"
+    assert summary.metrics is not None
+    assert summary.metrics.llm_call_count == 1
+    assert summary.metrics.total_tokens == 15
+    assert summary.metrics.models_by_role == {"analyzer": ["gemini-3.7-pro"]}

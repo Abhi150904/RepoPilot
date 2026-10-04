@@ -10,7 +10,12 @@ import pytest
 from app.core.llm import LLMProviderError, MockLLMProvider
 from app.graph.workflow import build_workflow
 from app.schemas.code_change import CodeChangeSet, FileChange
-from app.schemas.execution import GitSafetyReport, PublishResult, TestResult as ExecutionResult
+from app.schemas.execution import (
+    GitSafetyReport,
+    LLMUsageEvent,
+    PublishResult,
+    TestResult as ExecutionResult,
+)
 from app.schemas.issue import GitHubIssue
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryFile
@@ -34,6 +39,76 @@ def _remove_workspace_dir(root: Path) -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
+class MeteredMockLLM(MockLLMProvider):
+    def __init__(self, role: str, model: str = "metered-model") -> None:
+        self.role = role
+        self.model = model
+        self._usage_events = []
+
+    @property
+    def usage_events(self):
+        return list(self._usage_events)
+
+    def _record(self, total_tokens: int = 10, retry_count: int = 0) -> None:
+        self._usage_events.append(
+            LLMUsageEvent(
+                role=self.role,
+                provider="test",
+                model=self.model,
+                prompt_tokens=total_tokens - 3,
+                output_tokens=3,
+                total_tokens=total_tokens,
+                duration_ms=1.0,
+                success=True,
+                retry_count=retry_count,
+            )
+        )
+
+    def analyze_issue(self, issue):
+        self._record(total_tokens=11)
+        return super().analyze_issue(issue)
+
+    def create_plan(self, issue, analysis, repository_context=None):
+        self._record(total_tokens=13)
+        return super().create_plan(issue, analysis, repository_context)
+
+    def propose_code_changes(
+        self,
+        issue,
+        analysis,
+        plan,
+        target_files,
+        repair_context=None,
+    ):
+        self._record(total_tokens=17, retry_count=1 if repair_context else 0)
+        return super().propose_code_changes(
+            issue,
+            analysis,
+            plan,
+            target_files,
+            repair_context,
+        )
+
+    def review_changes(
+        self,
+        issue,
+        plan,
+        change_set,
+        diff,
+        test_analysis,
+        repair_attempts=0,
+    ):
+        self._record(total_tokens=19)
+        return super().review_changes(
+            issue,
+            plan,
+            change_set,
+            diff,
+            test_analysis,
+            repair_attempts,
+        )
+
+
 def test_version_zero_workflow_produces_analysis_and_plan() -> None:
     workflow = build_workflow()
 
@@ -47,6 +122,40 @@ def test_version_zero_workflow_produces_analysis_and_plan() -> None:
     assert result["plan"]["tests_required"]
     assert result["run_summary"]["status"] == "planned_only"
     assert "modified_files" not in result
+
+
+def test_workflow_collects_llm_usage_and_run_metrics(monkeypatch) -> None:
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(
+        workflow_module,
+        "get_llm",
+        lambda role: MeteredMockLLM(role=role, model=f"{role}-model"),
+    )
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {"issue": "Login endpoint returns 500 when email is missing."}
+    )
+
+    assert [event["role"] for event in result["llm_usage"]] == [
+        "analyzer",
+        "planner",
+        "coder",
+    ]
+    assert result["run_metrics"]["llm_call_count"] == 3
+    assert result["run_metrics"]["total_tokens"] == 41
+    assert result["run_metrics"]["models_by_role"] == {
+        "analyzer": ["analyzer-model"],
+        "planner": ["planner-model"],
+        "coder": ["coder-model"],
+    }
+    assert result["run_summary"]["metrics"]["llm_call_count"] == 3
+    assert {timing["stage"] for timing in result["stage_timings"]} == {
+        "analyzer",
+        "planner",
+        "coder",
+    }
 
 
 def test_workflow_summarizes_analyzer_provider_failure(monkeypatch) -> None:
@@ -751,6 +860,128 @@ def test_workflow_runs_one_bounded_repair_attempt(monkeypatch) -> None:
         assert result["run_summary"]["status"] == "awaiting_approval"
         assert result["run_summary"]["repair_attempts"] == 1
         assert target_file.read_text(encoding="utf-8") == "new value 2\n"
+    finally:
+        _remove_workspace_dir(root)
+
+
+def test_workflow_records_repair_coder_usage_as_separate_call(monkeypatch) -> None:
+    root = _make_workspace_dir()
+    app_file = root / "app.py"
+    test_file = root / "test_app.py"
+    app_file.write_text(
+        "def login(payload):\n"
+        "    email = payload[\"email\"]\n"
+        "    return {\"email\": email}\n",
+        encoding="utf-8",
+    )
+    test_file.write_text(
+        "from app import login\n\n"
+        "def test_missing_email_returns_validation_error():\n"
+        "    response, status = login({})\n"
+        "    assert status == 400\n"
+        "    assert response == {\"error\": \"email is required\"}\n",
+        encoding="utf-8",
+    )
+    coder_calls = {"count": 0}
+
+    class FakePlanner:
+        def __init__(self, llm=None):
+            pass
+
+        def create_plan(self, issue, analysis, repository_context=None):
+            return ImplementationPlan(
+                summary="Validate missing email before reading the payload.",
+                steps=["Add an email validation guard."],
+                files_to_inspect=["app.py"],
+                tests_required=["missing email returns validation error"],
+            )
+
+    class RepairingCoderLLM(MeteredMockLLM):
+        def propose_code_changes(
+            self,
+            issue,
+            analysis,
+            plan,
+            target_files,
+            repair_context=None,
+        ):
+            coder_calls["count"] += 1
+            self._record(total_tokens=20 + coder_calls["count"], retry_count=0)
+            if repair_context is None:
+                proposed = (
+                    "def login(payload):\n"
+                    "    return {\"email\": payload.get(\"email\")}\n"
+                )
+            else:
+                proposed = (
+                    "def login(payload):\n"
+                    "    email = payload.get(\"email\")\n"
+                    "    if not email:\n"
+                    "        return {\"error\": \"email is required\"}, 400\n"
+                    "    return {\"email\": email}\n"
+                )
+            return CodeChangeSet(
+                summary="Update login validation.",
+                changes=[
+                    FileChange(
+                        path="app.py",
+                        action="modify",
+                        explanation="Update login behavior.",
+                        proposed_content=proposed,
+                    )
+                ],
+            )
+
+    def fake_get_llm(role):
+        if role == "coder":
+            return RepairingCoderLLM(role="coder", model="coder-model")
+        return MeteredMockLLM(role=role, model=f"{role}-model")
+
+    def run_local_pytest(workspace_path, command):
+        completed = subprocess.run(
+            ["python", "-m", "pytest", "-p", "no:cacheprovider"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return ExecutionResult(
+            exit_code=completed.returncode,
+            passed=1 if completed.returncode == 0 else 0,
+            failed=0 if completed.returncode == 0 else 1,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            command=command,
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "Planner", FakePlanner)
+    monkeypatch.setattr(workflow_module, "get_llm", fake_get_llm)
+    monkeypatch.setattr(workflow_module, "run_tests_in_docker", run_local_pytest)
+    workflow = build_workflow()
+
+    try:
+        result = workflow.invoke(
+            {
+                "issue": "Login endpoint returns 500 when email is missing.",
+                "apply_changes": True,
+                "run_tests": True,
+                "workspace_path": str(root),
+                "max_repair_attempts": 1,
+            }
+        )
+
+        coder_usage = [
+            event for event in result["llm_usage"]
+            if event["role"] == "coder"
+        ]
+        assert result["run_summary"]["status"] == "awaiting_approval"
+        assert len(coder_usage) == 2
+        assert coder_usage[0]["repair_attempt"] is None
+        assert coder_usage[1]["repair_attempt"] == 1
+        assert result["run_metrics"]["llm_call_count"] == len(result["llm_usage"])
+        assert result["run_metrics"]["repair_attempts"] == 1
     finally:
         _remove_workspace_dir(root)
 
