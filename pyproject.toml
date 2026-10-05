@@ -5,6 +5,7 @@ description = "Agentic software engineering workflow that turns issues into impl
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.110.0",
     "langgraph>=0.2.0",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.2.0",
