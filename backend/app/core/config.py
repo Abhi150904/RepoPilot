@@ -88,6 +88,13 @@ class Settings(BaseSettings):
             "REPOPILOT_WORKSPACE_ROOT",
         ),
     )
+    default_test_command: str = Field(
+        default="python -m pytest",
+        validation_alias=AliasChoices(
+            "REPO_PILOT_DEFAULT_TEST_COMMAND",
+            "REPOPILOT_DEFAULT_TEST_COMMAND",
+        ),
+    )
     cors_origins: str = Field(
         default=(
             "http://localhost:3000,"

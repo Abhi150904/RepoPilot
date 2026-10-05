@@ -240,49 +240,96 @@ main.py
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+pip install -e .
 ```
 
 Create or edit `.env` in the project root if you want to override configuration. The default provider is `mock`, so no LLM API key is required.
 
-For GitHub mode, set `GITHUB_TOKEN` in `.env` when you want higher rate limits or need access to private repositories.
+Useful environment variables:
 
-## Run
-
-```bash
-python main.py
+```text
+REPO_PILOT_LLM_PROVIDER=gemini
+REPO_PILOT_LLM_MODEL=gemini-3.7-pro
+GEMINI_API_KEY=...
+GITHUB_TOKEN=...
+REPO_PILOT_DEFAULT_TEST_COMMAND=python -m pytest
 ```
 
-To run against a GitHub issue:
+Set `GITHUB_TOKEN` when you want higher rate limits, need access to private repositories, or want RepoPilot to push branches and open pull requests.
+
+## CLI Usage
+
+The product CLI is:
 
 ```bash
-python main.py --repo owner/name --issue 123
+python main.py run
 ```
 
-To explicitly apply structured changes to a local workspace:
+After installing the package, the same command is available as:
 
 ```bash
-python main.py --apply-changes --workspace path/to/workspace
+repopilot run
 ```
 
-To run tests in a Docker sandbox for a local workspace:
+Use `--help` to see all flags and examples:
 
 ```bash
-python main.py --run-tests --workspace path/to/workspace
+python main.py run --help
 ```
 
-To apply changes first and then run a custom test command:
+Plan from plain issue text:
 
 ```bash
-python main.py --apply-changes --run-tests --workspace path/to/workspace --test-command python -m pytest
+python main.py run --issue-text "Login endpoint returns 500 when email is missing"
 ```
 
-To change the retry limit:
+Run against a GitHub issue:
 
 ```bash
-python main.py --apply-changes --run-tests --workspace path/to/workspace --max-repair-attempts 0
+python main.py run --repo owner/name --issue 123
 ```
 
-`--workspace` is only accepted with `--apply-changes` or `--run-tests`.
+Apply changes in a workspace:
+
+```bash
+python main.py run --repo owner/name --issue 123 --apply
+```
+
+Apply changes and run tests. If `--test-command` is omitted, RepoPilot uses `REPO_PILOT_DEFAULT_TEST_COMMAND`, which defaults to `python -m pytest`.
+
+```bash
+python main.py run --repo owner/name --issue 123 --apply --test
+```
+
+Run a custom test command:
+
+```bash
+python main.py run --repo owner/name --issue 123 --apply --test --test-command pytest -q
+```
+
+Approve a reviewed run and validate publication without Git or GitHub side effects:
+
+```bash
+python main.py run --repo owner/name --issue 123 --apply --test --approve --dry-run
+```
+
+Publish a pull request after approval:
+
+```bash
+python main.py run --repo owner/name --issue 123 --apply --test --approve --publish pr
+```
+
+Print the full workflow result as JSON:
+
+```bash
+python main.py run --repo owner/name --issue 123 --json
+```
+
+Print detailed human-readable sections instead of the compact summary:
+
+```bash
+python main.py run --repo owner/name --issue 123 --verbose
+```
 
 ## Test
 
