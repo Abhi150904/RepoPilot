@@ -3,11 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import shutil
+from pathlib import Path
 from typing import Any, Sequence
 
+from pydantic import ValidationError
+
+from app.api.schemas import RunRequest, RunStatusResponse
 from app.core.config import get_settings
-from app.graph.workflow import build_workflow
-from app.tools.github import GitHubError
+from app.evals import retrieval as retrieval_eval
+from app.evals import runner as eval_runner
+from app.services.run_service import RepoPilotRunService
 
 
 EXAMPLE_ISSUE = "Login endpoint returns 500 when email is missing."
@@ -15,10 +21,28 @@ EXAMPLE_ISSUE = "Login endpoint returns 500 when email is missing."
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.command == "config":
+        report = _config_report()
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            _print_config_report(report)
+        return 0
+    if args.command == "eval":
+        return _run_eval_command(args)
+
     try:
-        result = build_workflow().invoke(_workflow_input(args))
-    except GitHubError as exc:
-        raise SystemExit(f"GitHub error: {exc}") from exc
+        request = RunRequest.model_validate(_workflow_input(args))
+    except ValidationError as exc:
+        raise SystemExit(_validation_message(exc)) from exc
+
+    run = _execute_run(request)
+    if run.lifecycle_status == "failed":
+        return _print_failed_run(run=run, json_output=args.json)
+    if run.response is None:
+        raise SystemExit(f"Run ended without a response: {run.lifecycle_status}")
+
+    result = run.response.result
 
     if args.json:
         print(json.dumps(result, indent=2))
@@ -54,10 +78,54 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_run_arguments(run_parser)
+    config_parser = subparsers.add_parser("config", help="Inspect RepoPilot configuration.")
+    config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
+    validate_parser = config_subparsers.add_parser(
+        "validate",
+        help="Validate local RepoPilot configuration.",
+    )
+    validate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print configuration status as JSON.",
+    )
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="Run RepoPilot eval suites.",
+        description="Run workflow eval cases or retrieval benchmarks.",
+    )
+    eval_parser.add_argument(
+        "eval_suite",
+        nargs="?",
+        choices=["workflow", "retrieval"],
+        default="workflow",
+        help="Eval suite to run. Defaults to workflow.",
+    )
+    eval_parser.add_argument(
+        "paths",
+        nargs="*",
+        help="Workflow eval case files or directories. Defaults to backend/tests/fixtures/evals.",
+    )
+    eval_parser.add_argument(
+        "--benchmark",
+        default=str(retrieval_eval.DEFAULT_BENCHMARK_PATH),
+        help="Retrieval benchmark JSON file.",
+    )
+    eval_parser.add_argument(
+        "--limit",
+        type=int,
+        default=retrieval_eval.DEFAULT_RETRIEVAL_LIMIT,
+        help="Maximum retrieval results to request from each retriever.",
+    )
+    eval_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print eval results as JSON.",
+    )
     _add_run_arguments(parser)
 
     args = parser.parse_args(argv)
-    if args.command not in (None, "run"):
+    if args.command not in (None, "run", "config", "eval"):
         parser.error(f"Unknown command: {args.command}")
     return args
 
@@ -191,7 +259,7 @@ def _workflow_input(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit("--publish requires --workspace outside GitHub mode.")
         if publish_mode == "pr" and not args.repo:
             raise SystemExit("--publish pr requires --repo.")
-        data[_publish_state_key(publish_mode)] = True
+        data.update(_publish_state(publish_mode))
 
     return data
 
@@ -222,13 +290,114 @@ def _default_test_command() -> list[str]:
     return shlex.split(command)
 
 
-def _publish_state_key(mode: str) -> str:
+def _publish_state(mode: str) -> dict[str, bool]:
     return {
-        "dry-run": "publish_dry_run",
-        "local": "publish_local",
-        "push": "publish_push",
-        "pr": "publish_pr",
+        "dry-run": {"publish_dry_run": True},
+        "local": {"publish_local": True},
+        "push": {"publish_local": True, "publish_push": True},
+        "pr": {"publish_local": True, "publish_push": True, "publish_pr": True},
     }[mode]
+
+
+def _execute_run(request: RunRequest) -> RunStatusResponse:
+    service = RepoPilotRunService()
+    run = service.create_run(request)
+    service.execute_run(run.run_id)
+    return service.get_run(run.run_id)
+
+
+def _run_eval_command(args: argparse.Namespace) -> int:
+    if args.eval_suite == "retrieval":
+        benchmark = retrieval_eval.load_retrieval_benchmark(Path(args.benchmark))
+        result = retrieval_eval.run_retrieval_benchmark(benchmark, limit=args.limit)
+        if args.json:
+            print(result.model_dump_json(indent=2))
+        else:
+            retrieval_eval._print_report(result)
+        return 0
+
+    input_paths = [Path(path) for path in args.paths] or [eval_runner.DEFAULT_CASE_DIR]
+    case_paths = eval_runner.discover_eval_cases(input_paths)
+    if not case_paths:
+        raise SystemExit("No eval case files found.")
+
+    result = eval_runner.run_eval_suite(case_paths)
+    if args.json:
+        print(result.model_dump_json(indent=2))
+    else:
+        eval_runner._print_report(result)
+    return 1 if result.failed else 0
+
+
+def _print_failed_run(*, run: RunStatusResponse, json_output: bool) -> int:
+    if json_output:
+        print(run.model_dump_json(indent=2))
+        return 2
+
+    print("RepoPilot run failed")
+    print()
+    if run.error is None:
+        print("Error: Run failed without an error payload.")
+        return 2
+    print(f"Code: {run.error.code}")
+    print(f"Type: {run.error.type or 'unknown'}")
+    print(f"Message: {run.error.message}")
+    return 2
+
+
+def _validation_message(exc: ValidationError) -> str:
+    error = exc.errors()[0] if exc.errors() else {}
+    message = error.get("msg")
+    if isinstance(message, str) and message:
+        return message
+    return "Invalid run request."
+
+
+def _config_report() -> dict[str, Any]:
+    settings = get_settings()
+    provider = settings.llm_provider
+    gemini_required = provider.lower() == "gemini"
+    gemini_configured = bool(settings.gemini_api_key)
+    github_configured = bool(settings.github_token)
+
+    return {
+        "llm_provider": provider,
+        "llm_model": settings.llm_model,
+        "gemini_api_key": {
+            "required": gemini_required,
+            "configured": gemini_configured,
+            "status": "configured" if gemini_configured else "missing",
+        },
+        "github_token": {
+            "configured": github_configured,
+            "status": "configured" if github_configured else "missing",
+        },
+        "workspace_root": settings.workspace_root,
+        "default_test_command": settings.default_test_command,
+        "cli_install": {
+            "available": shutil.which("repopilot") is not None,
+            "path": shutil.which("repopilot"),
+        },
+    }
+
+
+def _print_config_report(report: dict[str, Any]) -> None:
+    gemini = _dict_or_none(report.get("gemini_api_key")) or {}
+    github = _dict_or_none(report.get("github_token")) or {}
+    cli_install = _dict_or_none(report.get("cli_install")) or {}
+
+    print("RepoPilot config")
+    print()
+    print(f"LLM provider: {report['llm_provider']}")
+    print(f"LLM model: {report['llm_model']}")
+    print(f"Gemini API key: {gemini.get('status', 'unknown')}")
+    print(f"GitHub token: {github.get('status', 'unknown')}")
+    print(f"Workspace root: {report['workspace_root']}")
+    print(f"Default test command: {report['default_test_command']}")
+    cli_status = "available" if cli_install.get("available") else "missing"
+    print(f"CLI install: {cli_status}")
+    if cli_install.get("path"):
+        print(f"CLI path: {cli_install['path']}")
 
 
 def _print_result(result: dict[str, Any]) -> None:
