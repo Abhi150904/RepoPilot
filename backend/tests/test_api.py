@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
@@ -365,6 +367,36 @@ def test_publish_dry_run_updates_run_after_approval(monkeypatch) -> None:
     assert response.json()["response"]["artifacts"]["publish_result"]["mode"] == "dry_run"
 
 
+def test_publish_rejects_workspace_changed_after_approval(tmp_path, monkeypatch) -> None:
+    import app.api.app as api_module
+
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "RepoPilot Test")
+    (tmp_path / "app.py").write_text("print('before')\n", encoding="utf-8")
+    _git(tmp_path, "add", "app.py")
+    _git(tmp_path, "commit", "-m", "initial")
+    (tmp_path / "app.py").write_text("print('approved')\n", encoding="utf-8")
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            result = _reviewed_run_result()
+            result["workspace_path"] = str(tmp_path)
+            result["modified_files"] = ["app.py"]
+            return result
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app())
+    started = client.post("/runs", json={"issue": "Login endpoint fails"})
+    client.post(f"/runs/{started.json()['run_id']}/approve", json={})
+
+    (tmp_path / "app.py").write_text("print('changed after approval')\n", encoding="utf-8")
+    response = client.post(f"/runs/{started.json()['run_id']}/publish", json={"mode": "dry_run"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "approval_binding_stale"
+
+
 def test_create_run_validates_required_issue_input() -> None:
     client = TestClient(create_app())
 
@@ -557,4 +589,15 @@ def _reviewed_run_result() -> dict[str, object]:
             "next_action": "human_review",
         },
     }
+
+
+def _git(path, *args: str) -> None:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 

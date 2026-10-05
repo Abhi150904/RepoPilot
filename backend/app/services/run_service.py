@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+import subprocess
+from threading import Lock
 from typing import Any
 
 from app.agents.approval import ApprovalGate
@@ -34,6 +38,7 @@ class RunServiceError(Exception):
 class RepoPilotRunService:
     def __init__(self, run_store: RunStore | None = None) -> None:
         self.run_store = run_store or RunStore()
+        self._transition_lock = Lock()
 
     def create_run(self, request: RunRequest) -> RunStatusResponse:
         return self.run_store.create(_workflow_input(request))
@@ -63,58 +68,69 @@ class RepoPilotRunService:
         run_id: str,
         request: ApprovalRequest | None = None,
     ) -> RunStatusResponse:
-        response = self._completed_response(run_id)
-        result = dict(response.result)
-        review = _review_result(result)
-        approval = ApprovalGate().decide(review=review, approved=True)
-        result["approval_decision"] = approval.model_dump()
-        if request and request.note:
-            result["approval_note"] = request.note
-        result["run_summary"] = RunSummarizer().summarize(result).model_dump()
-        return self.run_store.update_response(run_id, _run_response(result))
+        with self._transition_lock:
+            response = self._completed_response(run_id)
+            result = dict(response.result)
+            review = _review_result(result)
+            approval = ApprovalGate().decide(review=review, approved=True)
+            result["approval_decision"] = approval.model_dump()
+            result["approval_binding"] = _approval_binding(result)
+            if request and request.note:
+                result["approval_note"] = request.note
+            result["run_summary"] = RunSummarizer().summarize(result).model_dump()
+            return self.run_store.update_response(run_id, _run_response(result))
 
     def reject_run(
         self,
         run_id: str,
         request: RejectRequest | None = None,
     ) -> RunStatusResponse:
-        response = self._completed_response(run_id)
-        result = dict(response.result)
-        result["approval_decision"] = ApprovalDecision(
-            approved=False,
-            status="not_ready",
-            summary="Human reviewer rejected this run.",
-            next_action="inspect_failure",
-        ).model_dump()
-        if request and request.reason:
-            result["rejection_reason"] = request.reason
-        summary = dict(response.run_summary)
-        summary.update(
-            {
-                "status": "needs_human",
-                "summary": "Human reviewer rejected this run.",
-                "next_action": "inspect_failure",
-            }
-        )
-        result["run_summary"] = summary
-        return self.run_store.update_response(run_id, _run_response(result))
+        with self._transition_lock:
+            response = self._completed_response(run_id)
+            result = dict(response.result)
+            result["approval_decision"] = ApprovalDecision(
+                approved=False,
+                status="not_ready",
+                summary="Human reviewer rejected this run.",
+                next_action="inspect_failure",
+            ).model_dump()
+            result.pop("approval_binding", None)
+            if request and request.reason:
+                result["rejection_reason"] = request.reason
+            summary = dict(response.run_summary)
+            summary.update(
+                {
+                    "status": "needs_human",
+                    "summary": "Human reviewer rejected this run.",
+                    "next_action": "inspect_failure",
+                }
+            )
+            result["run_summary"] = summary
+            return self.run_store.update_response(run_id, _run_response(result))
 
     def publish_run(self, run_id: str, request: PublishRequest) -> RunStatusResponse:
-        response = self._completed_response(run_id)
-        result = dict(response.result)
-        approval = _approval_decision(result)
-        if not approval.approved:
-            raise RunServiceError(
-                status_code=409,
-                code="approval_required",
-                message="Run must be approved before publication.",
+        with self._transition_lock:
+            response = self._completed_response(run_id)
+            result = dict(response.result)
+            approval = _approval_decision(result)
+            if not approval.approved:
+                raise RunServiceError(
+                    status_code=409,
+                    code="approval_required",
+                    message="Run must be approved before publication.",
+                )
+            _validate_approval_binding(result)
+            package = _publication_package(result, approval)
+            publish_result = _publish(
+                package=package,
+                result=result,
+                mode=request.mode,
+                previous=_publish_result(result),
             )
-        package = _publication_package(result, approval)
-        publish_result = _publish(package=package, result=result, mode=request.mode)
-        result["publication_package"] = package.model_dump()
-        result["publish_result"] = publish_result.model_dump()
-        result["run_summary"] = RunSummarizer().summarize(result).model_dump()
-        return self.run_store.update_response(run_id, _run_response(result))
+            result["publication_package"] = package.model_dump()
+            result["publish_result"] = publish_result.model_dump()
+            result["run_summary"] = RunSummarizer().summarize(result).model_dump()
+            return self.run_store.update_response(run_id, _run_response(result))
 
     def get_metrics(self, run_id: str) -> MetricsResponse:
         response = self._completed_response(run_id)
@@ -199,14 +215,93 @@ def _approval_decision(result: dict[str, Any]) -> ApprovalDecision:
     return ApprovalDecision.model_validate(approval)
 
 
+def _publish_result(result: dict[str, Any]) -> PublishResult | None:
+    publish_result = result.get("publish_result")
+    if not isinstance(publish_result, dict):
+        return None
+    return PublishResult.model_validate(publish_result)
+
+
+def _approval_binding(result: dict[str, Any]) -> dict[str, Any]:
+    workspace_path = _string_or_none(result.get("workspace_path"))
+    changed_files = _string_list(result.get("modified_files"))
+    if not workspace_path or not changed_files:
+        return {
+            "status": "unavailable",
+            "summary": "Approval could not be bound to workspace contents.",
+            "workspace_path": workspace_path,
+            "changed_files": changed_files,
+        }
+
+    safety = inspect_git_safety(
+        workspace_path=workspace_path,
+        expected_changed_files=changed_files,
+    )
+    return {
+        "status": "bound" if safety.status == "safe" else "needs_attention",
+        "summary": "Approval is bound to the current workspace contents.",
+        "workspace_path": workspace_path,
+        "changed_files": changed_files,
+        "content_digest": _workspace_content_digest(
+            workspace_path=workspace_path,
+            changed_files=changed_files,
+        ),
+        "head_commit": _git_output(workspace_path, "rev-parse", "HEAD"),
+        "git_safety": safety.model_dump(),
+    }
+
+
+def _validate_approval_binding(result: dict[str, Any]) -> None:
+    binding = result.get("approval_binding")
+    if not isinstance(binding, dict):
+        raise RunServiceError(
+            status_code=409,
+            code="approval_binding_required",
+            message="Run approval must be bound to workspace contents before publication.",
+        )
+    if binding.get("status") != "bound":
+        raise RunServiceError(
+            status_code=409,
+            code="approval_binding_unavailable",
+            message="Run approval could not be safely bound to workspace contents.",
+        )
+
+    workspace_path = _string_or_none(binding.get("workspace_path"))
+    changed_files = _string_list(binding.get("changed_files"))
+    if not workspace_path or not changed_files:
+        raise RunServiceError(
+            status_code=409,
+            code="approval_binding_unavailable",
+            message="Run approval is missing workspace binding details.",
+        )
+
+    safety = inspect_git_safety(
+        workspace_path=workspace_path,
+        expected_changed_files=changed_files,
+    )
+    if safety.status != "safe":
+        raise RunServiceError(
+            status_code=409,
+            code="git_safety_failed",
+            message="Workspace safety must be revalidated before publication.",
+        )
+
+    current_digest = _workspace_content_digest(
+        workspace_path=workspace_path,
+        changed_files=changed_files,
+    )
+    if binding.get("content_digest") != current_digest:
+        raise RunServiceError(
+            status_code=409,
+            code="approval_binding_stale",
+            message="Workspace contents changed after approval. Re-approve before publishing.",
+        )
+
+
 def _publication_package(
     result: dict[str, Any],
     approval: ApprovalDecision,
 ) -> PublicationPackage:
-    existing = result.get("publication_package")
-    if isinstance(existing, dict):
-        return PublicationPackage.model_validate(existing)
-
     changed_files = _string_list(result.get("modified_files"))
     workspace_path = _string_or_none(result.get("workspace_path"))
     git_safety = None
@@ -215,6 +310,12 @@ def _publication_package(
             workspace_path=workspace_path,
             expected_changed_files=changed_files,
         )
+
+    existing = result.get("publication_package")
+    if isinstance(existing, dict):
+        package = PublicationPackage.model_validate(existing)
+        return package.model_copy(update={"git_safety": git_safety})
+
     run_workspace = _dict_or_none(result.get("run_workspace"))
     branch_name = None
     branch_exists = False
@@ -239,18 +340,28 @@ def _publish(
     package: PublicationPackage,
     result: dict[str, Any],
     mode: str,
+    previous: PublishResult | None = None,
 ) -> PublishResult:
     executor = PublishExecutor(workspace_path=_string_or_none(result.get("workspace_path")))
     if mode == "dry_run":
         return executor.dry_run(package)
 
-    local_result = executor.publish_local(package)
+    if previous and previous.mode in ("local", "push", "pr") and previous.status == "published":
+        local_result = previous
+    else:
+        local_result = executor.publish_local(package)
     if mode == "local" or local_result.status != "published":
         return local_result
 
-    push_result = executor.push_branch(package=package, local_result=local_result)
+    if previous and previous.mode in ("push", "pr") and previous.status == "published":
+        push_result = previous
+    else:
+        push_result = executor.push_branch(package=package, local_result=local_result)
     if mode == "push" or push_result.status != "published":
         return push_result
+
+    if previous and previous.mode == "pr" and previous.status == "published":
+        return previous
 
     return executor.open_pull_request(
         package=package,
@@ -258,6 +369,32 @@ def _publish(
         repository=_string_or_none(result.get("repository")),
         github=GitHubClient(),
     )
+
+
+def _workspace_content_digest(*, workspace_path: str, changed_files: list[str]) -> str:
+    root = Path(workspace_path)
+    digest = hashlib.sha256()
+    for path in sorted(changed_files):
+        digest.update(path.encode("utf-8"))
+        file_path = root / path
+        if file_path.exists() and file_path.is_file():
+            digest.update(file_path.read_bytes())
+        else:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def _git_output(workspace_path: str, *args: str) -> str | None:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
 
 
 def _run_artifacts(

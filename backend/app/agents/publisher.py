@@ -65,12 +65,12 @@ class PublishExecutor:
         steps = []
         current_branch = _current_branch(root)
         if current_branch != package.branch_name:
-            steps.append(
-                (
-                    ["git", "checkout", "-b", package.branch_name],
-                    f"git checkout -b {package.branch_name}",
-                )
-            )
+            checkout_args = ["git", "checkout", "-b", package.branch_name]
+            checkout_display = f"git checkout -b {package.branch_name}"
+            if _branch_exists(root, package.branch_name):
+                checkout_args = ["git", "checkout", package.branch_name]
+                checkout_display = f"git checkout {package.branch_name}"
+            steps.append((checkout_args, checkout_display))
         steps.extend(
             [
                 (["git", "add", *package.changed_files], f"git add {' '.join(package.changed_files)}"),
@@ -80,6 +80,14 @@ class PublishExecutor:
         for args, display in steps:
             completed = _run(args=args, root=root)
             if completed.returncode != 0:
+                if args[:2] == ["git", "commit"]:
+                    recovered = _recover_existing_local_commit(
+                        root=root,
+                        package=package,
+                        executed=executed,
+                    )
+                    if recovered is not None:
+                        return recovered
                 return PublishResult(
                     mode="local",
                     status="blocked",
@@ -308,3 +316,43 @@ def _current_branch(root: Path) -> str | None:
         return None
     branch = completed.stdout.strip()
     return branch or None
+
+
+def _branch_exists(root: Path, branch_name: str) -> bool:
+    completed = _run(args=["git", "rev-parse", "--verify", branch_name], root=root)
+    return completed.returncode == 0
+
+
+def _recover_existing_local_commit(
+    *,
+    root: Path,
+    package: PublicationPackage,
+    executed: list[str],
+) -> PublishResult | None:
+    current_branch = _current_branch(root)
+    if current_branch != package.branch_name:
+        return None
+
+    subject = _run(args=["git", "log", "-1", "--pretty=%s"], root=root)
+    if subject.returncode != 0 or subject.stdout.strip() != package.commit_message:
+        return None
+
+    sha = _run(args=["git", "rev-parse", "HEAD"], root=root)
+    commit_sha = sha.stdout.strip() if sha.returncode == 0 else None
+    if not commit_sha:
+        return None
+
+    return PublishResult(
+        mode="local",
+        status="published",
+        summary="Local publication was already completed. Reusing the existing commit.",
+        commands=package.commands,
+        executed_commands=executed,
+        pr_title=package.pr_title,
+        pr_body=package.pr_body,
+        pr_url=package.pr_url,
+        commit_sha=commit_sha,
+        branch_name=package.branch_name,
+        blockers=[],
+        next_action="push_branch",
+    )
