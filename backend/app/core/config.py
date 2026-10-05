@@ -88,6 +88,18 @@ class Settings(BaseSettings):
             "REPOPILOT_WORKSPACE_ROOT",
         ),
     )
+    cors_origins: str = Field(
+        default=(
+            "http://localhost:3000,"
+            "http://127.0.0.1:3000,"
+            "http://localhost:5173,"
+            "http://127.0.0.1:5173"
+        ),
+        validation_alias=AliasChoices(
+            "REPO_PILOT_CORS_ORIGINS",
+            "REPOPILOT_CORS_ORIGINS",
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
