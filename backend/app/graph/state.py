@@ -23,6 +23,7 @@ class AgentState(TypedDict, total=False):
     run_metrics: dict[str, object]
     apply_changes: bool
     workspace_path: str
+    run_workspace: dict[str, object]
     modified_files: list[str]
     run_tests: bool
     test_runner: str

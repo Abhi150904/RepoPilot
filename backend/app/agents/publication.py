@@ -17,13 +17,15 @@ class PublicationPreparer:
         issue_number: int | None = None,
         repository: str | None = None,
         git_safety: GitSafetyReport | None = None,
+        branch_name: str | None = None,
+        branch_exists: bool = False,
     ) -> PublicationPackage:
         if not approval.approved:
             raise ValueError("Publication can only be prepared after human approval.")
 
         title = _first_line(issue)
         short_title = _clean_title(title)
-        branch_name = _branch_name(short_title, issue_number)
+        branch_name = branch_name or _branch_name(short_title, issue_number)
         commit_message = _commit_message(short_title)
         pr_title = _pr_title(short_title, issue_number)
         pr_body = _pr_body(
@@ -35,6 +37,7 @@ class PublicationPreparer:
             branch_name=branch_name,
             changed_files=changed_files,
             commit_message=commit_message,
+            branch_exists=branch_exists,
         )
         pr_url = _pr_url(repository=repository, branch_name=branch_name)
         pr_command = _pr_command(title=pr_title, body=pr_body)
@@ -123,8 +126,11 @@ def _commands(
     branch_name: str,
     changed_files: list[str],
     commit_message: str,
+    branch_exists: bool = False,
 ) -> list[str]:
-    commands = [f"git checkout -b {_quote(branch_name)}"]
+    commands = []
+    if not branch_exists:
+        commands.append(f"git checkout -b {_quote(branch_name)}")
     if changed_files:
         files = " ".join(_quote(path) for path in changed_files)
         commands.append(f"git add {files}")

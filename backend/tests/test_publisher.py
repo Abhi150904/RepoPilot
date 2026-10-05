@@ -125,6 +125,44 @@ def test_publish_executor_local_creates_branch_and_commit(tmp_path) -> None:
     assert _git_output(tmp_path, "log", "-1", "--pretty=%s") == "fix login validation"
 
 
+def test_publish_executor_local_reuses_current_branch(tmp_path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "RepoPilot Test")
+    _git(tmp_path, "checkout", "-b", "repopilot/issue-16-app-crashes")
+    (tmp_path / "app.py").write_text("print('fixed')\n", encoding="utf-8")
+
+    result = PublishExecutor(workspace_path=str(tmp_path)).publish_local(
+        PublicationPackage(
+            status="ready_to_publish",
+            branch_name="repopilot/issue-16-app-crashes",
+            commit_message="app crashes when destination field is empty",
+            pr_title="Fix #16: App crashes when destination field is empty",
+            pr_body="## Summary\n- Fix app crash",
+            changed_files=["app.py"],
+            commands=[
+                'git add "app.py"',
+                'git commit -m "app crashes when destination field is empty"',
+                'git push -u origin "repopilot/issue-16-app-crashes"',
+            ],
+            git_safety=GitSafetyReport(
+                status="safe",
+                summary="Git safety check found only RepoPilot-applied changes.",
+            ),
+            next_action="create_pull_request",
+        )
+    )
+
+    assert result.mode == "local"
+    assert result.status == "published"
+    assert result.branch_name == "repopilot/issue-16-app-crashes"
+    assert result.executed_commands == [
+        "git add app.py",
+        "git commit -m app crashes when destination field is empty",
+    ]
+    assert _git_output(tmp_path, "branch", "--show-current") == "repopilot/issue-16-app-crashes"
+
+
 def test_publish_executor_local_blocks_without_workspace() -> None:
     result = PublishExecutor().publish_local(
         PublicationPackage(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 
 from langgraph.graph import END, START, StateGraph
@@ -39,6 +40,7 @@ from app.tools.git import inspect_git_safety
 from app.tools.github import GitHubClient
 from app.tools.patch import apply_change_set
 from app.tools.sandbox import run_tests_in_docker, run_tests_locally
+from app.tools.workspace import create_run_worktree
 
 
 def start_route(state: AgentState) -> str:
@@ -58,7 +60,7 @@ def after_analyzer_route(state: AgentState) -> str:
 def after_planner_route(state: AgentState) -> str:
     if "llm_error" in state:
         return "end"
-    return "load_target_files"
+    return "prepare_repository_workspace"
 
 
 def after_code_writer_route(state: AgentState) -> str:
@@ -262,6 +264,28 @@ def load_target_files_node(state: AgentState) -> AgentState:
     return {"target_files": [file.model_dump() for file in source_files]}
 
 
+def prepare_repository_workspace_node(state: AgentState) -> AgentState:
+    if state.get("workspace_path") or "repository" not in state:
+        return {}
+    if not _needs_local_workspace(state):
+        return {}
+
+    worktree = create_run_worktree(
+        repo=state["repository"],
+        branch_name=_workspace_branch_name(state),
+    )
+    return {
+        "workspace_path": str(worktree.path),
+        "run_workspace": {
+            "repo": worktree.repo,
+            "source_path": str(worktree.source_path),
+            "path": str(worktree.path),
+            "branch_name": worktree.branch_name,
+            "base_ref": worktree.base_ref,
+        },
+    }
+
+
 def code_writer_node(state: AgentState) -> AgentState:
     started = time.perf_counter()
     issue = state["issue"]
@@ -436,6 +460,14 @@ def prepare_publication_node(state: AgentState) -> AgentState:
     approval = ApprovalDecision.model_validate(state["approval_decision"])
     changed_files = state.get("modified_files", [])
     git_safety = None
+    branch_name = None
+    branch_exists = False
+    run_workspace = state.get("run_workspace")
+    if isinstance(run_workspace, dict):
+        branch_value = run_workspace.get("branch_name")
+        if isinstance(branch_value, str) and branch_value:
+            branch_name = branch_value
+            branch_exists = True
     if "workspace_path" in state:
         git_safety = inspect_git_safety(
             workspace_path=state["workspace_path"],
@@ -448,6 +480,8 @@ def prepare_publication_node(state: AgentState) -> AgentState:
         issue_number=state.get("issue_number"),
         repository=state.get("repository"),
         git_safety=git_safety,
+        branch_name=branch_name,
+        branch_exists=branch_exists,
     )
     return {"publication_package": package.model_dump()}
 
@@ -652,12 +686,37 @@ def _select_target_paths(
     return selected
 
 
+def _needs_local_workspace(state: AgentState) -> bool:
+    return any(
+        state.get(flag)
+        for flag in (
+            "apply_changes",
+            "run_tests",
+            "publish_dry_run",
+            "publish_local",
+            "publish_push",
+            "publish_pr",
+        )
+    )
+
+
+def _workspace_branch_name(state: AgentState) -> str:
+    issue_number = state.get("issue_number")
+    issue_title = state.get("issue_title") or state.get("issue", "repopilot changes")
+    slug = re.sub(r"[^a-z0-9]+", "-", str(issue_title).lower()).strip("-")
+    slug = re.sub(r"-+", "-", slug)[:50].strip("-") or "changes"
+    if issue_number is not None:
+        return f"repopilot/issue-{issue_number}-{slug}"
+    return f"repopilot/{slug}"
+
+
 def build_workflow():
     graph = StateGraph(AgentState)
     graph.add_node("fetch_github_issue", fetch_github_issue_node)
     graph.add_node("issue_analyzer", issue_analyzer_node)
     graph.add_node("repo_explorer", repo_explorer_node)
     graph.add_node("planner", planner_node)
+    graph.add_node("prepare_repository_workspace", prepare_repository_workspace_node)
     graph.add_node("load_target_files", load_target_files_node)
     graph.add_node("code_writer", code_writer_node)
     graph.add_node("apply_code_changes", apply_code_changes_node)
@@ -698,10 +757,11 @@ def build_workflow():
         "planner",
         after_planner_route,
         {
-            "load_target_files": "load_target_files",
+            "prepare_repository_workspace": "prepare_repository_workspace",
             "end": "collect_run_metrics",
         },
     )
+    graph.add_edge("prepare_repository_workspace", "load_target_files")
     graph.add_edge("load_target_files", "code_writer")
     graph.add_conditional_edges(
         "code_writer",

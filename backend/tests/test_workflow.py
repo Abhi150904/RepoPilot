@@ -20,6 +20,7 @@ from app.schemas.issue import GitHubIssue
 from app.schemas.plan import ImplementationPlan
 from app.schemas.repository import RepositoryFile
 from app.tools.github import GitHubError
+from app.tools.workspace import RunWorkspace
 
 
 @pytest.fixture(autouse=True)
@@ -366,6 +367,135 @@ def test_github_issue_workflow_fetches_issue_and_repository_context(monkeypatch)
     assert result["code_changes"]["changes"]
     assert result["diff"]
     assert "modified_files" not in result
+
+
+def test_github_issue_workflow_applies_changes_in_run_worktree(monkeypatch, tmp_path) -> None:
+    source_path = tmp_path / "source"
+    run_path = tmp_path / "runs" / "repopilot" / "issue-16-login"
+    source_path.mkdir(parents=True)
+    run_path.mkdir(parents=True)
+    app_file = run_path / "app.py"
+    app_file.write_text(
+        "def login(payload):\n"
+        "    email = payload[\"email\"]\n"
+        "    return {\"email\": email}\n",
+        encoding="utf-8",
+    )
+    created_worktrees = []
+
+    class FakeGitHubClient:
+        def get_issue(self, repo: str, issue_number: int) -> GitHubIssue:
+            assert repo == "example/demo"
+            assert issue_number == 16
+            return GitHubIssue(
+                number=16,
+                title="Login endpoint returns 500 when email is missing",
+                body="Posting no email should return a validation error.",
+                url="https://github.com/example/demo/issues/16",
+            )
+
+        def list_repository_files(self, repo: str) -> list[RepositoryFile]:
+            assert repo == "example/demo"
+            return [
+                RepositoryFile(path="app.py", size=120),
+                RepositoryFile(path="tests/test_app.py", size=200),
+            ]
+
+        def read_file(self, repo: str, path: str) -> str:
+            assert repo == "example/demo"
+            if path == "app.py":
+                return app_file.read_text(encoding="utf-8")
+            return "# test placeholder\n"
+
+        def search_code(self, repo: str, query: str) -> list[str]:
+            assert repo == "example/demo"
+            return ["app.py"]
+
+    class FakePlanner:
+        def __init__(self, llm=None):
+            pass
+
+        def create_plan(self, issue, analysis, repository_context=None):
+            return ImplementationPlan(
+                summary="Validate missing email before reading the payload.",
+                steps=["Add a missing email guard."],
+                files_to_inspect=["app.py"],
+                tests_required=["missing email returns validation error"],
+            )
+
+    class FakeCodeWriter:
+        def __init__(self, llm=None):
+            pass
+
+        def propose_changes(
+            self,
+            issue,
+            analysis=None,
+            plan=None,
+            target_files=None,
+            repository_context=None,
+            repair_context=None,
+        ):
+            assert target_files
+            assert target_files[0].path == "app.py"
+            assert 'payload["email"]' in target_files[0].content
+            return CodeChangeSet(
+                summary="Add missing email validation.",
+                changes=[
+                    FileChange(
+                        path="app.py",
+                        action="modify",
+                        explanation="Return a validation error before reading email.",
+                        proposed_content=(
+                            "def login(payload):\n"
+                            "    email = payload.get(\"email\")\n"
+                            "    if not email:\n"
+                            "        return {\"error\": \"email is required\"}, 400\n"
+                            "    return {\"email\": email}\n"
+                        ),
+                    )
+                ],
+            )
+
+    def fake_create_run_worktree(repo: str, branch_name: str) -> RunWorkspace:
+        created_worktrees.append({"repo": repo, "branch_name": branch_name})
+        return RunWorkspace(
+            repo=repo,
+            source_path=source_path,
+            path=run_path,
+            branch_name=branch_name,
+            base_ref="HEAD",
+        )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr(workflow_module, "Planner", FakePlanner)
+    monkeypatch.setattr(workflow_module, "CodeWriter", FakeCodeWriter)
+    monkeypatch.setattr(workflow_module, "create_run_worktree", fake_create_run_worktree)
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {
+            "repository": "example/demo",
+            "issue_number": 16,
+            "apply_changes": True,
+        }
+    )
+
+    updated_source = app_file.read_text(encoding="utf-8")
+    assert result["workspace_path"] == str(run_path)
+    assert result["run_workspace"]["path"] == str(run_path)
+    assert result["run_workspace"]["source_path"] == str(source_path)
+    assert result["modified_files"] == ["app.py"]
+    assert "payload.get(\"email\")" in updated_source
+    assert "email is required" in updated_source
+    assert created_worktrees == [
+        {
+            "repo": "example/demo",
+            "branch_name": "repopilot/issue-16-login-endpoint-returns-500-when-email-is-missing",
+        }
+    ]
 
 
 def test_github_issue_workflow_rejects_pull_request_numbers(monkeypatch) -> None:
@@ -804,6 +934,53 @@ def test_workflow_can_run_publish_dry_run(monkeypatch) -> None:
         assert result["publish_result"]["next_action"] == "run_publication_commands"
     finally:
         _remove_workspace_dir(root)
+
+
+def test_prepare_publication_reuses_run_workspace_branch(monkeypatch) -> None:
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(
+        workflow_module,
+        "inspect_git_safety",
+        lambda workspace_path, expected_changed_files: GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+        ),
+    )
+
+    result = workflow_module.prepare_publication_node(
+        {
+            "issue": "App crashes when destination field is empty.",
+            "issue_number": 16,
+            "repository": "Abhi150904/Wandr",
+            "workspace_path": ".repopilot/workspaces/Abhi150904__Wandr/runs/repopilot/issue-16",
+            "run_workspace": {
+                "repo": "Abhi150904/Wandr",
+                "source_path": ".repopilot/workspaces/Abhi150904__Wandr",
+                "path": ".repopilot/workspaces/Abhi150904__Wandr/runs/repopilot/issue-16",
+                "branch_name": "repopilot/issue-16-app-crashes",
+                "base_ref": "HEAD",
+            },
+            "modified_files": ["src/search.py"],
+            "approval_decision": {
+                "approved": True,
+                "status": "approved",
+                "summary": "Human approval was provided for this reviewed patch.",
+                "next_action": "commit_changes",
+            },
+        }
+    )
+
+    package = result["publication_package"]
+    assert package["branch_name"] == "repopilot/issue-16-app-crashes"
+    assert package["commands"] == [
+        'git add "src/search.py"',
+        'git commit -m "app crashes when destination field is empty"',
+        'git push -u origin "repopilot/issue-16-app-crashes"',
+    ]
+    assert package["pr_url"] == (
+        "https://github.com/Abhi150904/Wandr/pull/new/repopilot/issue-16-app-crashes"
+    )
 
 
 def test_workflow_requires_workspace_path_when_running_tests() -> None:

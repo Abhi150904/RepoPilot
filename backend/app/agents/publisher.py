@@ -62,11 +62,21 @@ class PublishExecutor:
 
         root = Path(self.workspace_path)
         executed: list[str] = []
-        steps = [
-            (["git", "checkout", "-b", package.branch_name], f"git checkout -b {package.branch_name}"),
-            (["git", "add", *package.changed_files], f"git add {' '.join(package.changed_files)}"),
-            (["git", "commit", "-m", package.commit_message], f"git commit -m {package.commit_message}"),
-        ]
+        steps = []
+        current_branch = _current_branch(root)
+        if current_branch != package.branch_name:
+            steps.append(
+                (
+                    ["git", "checkout", "-b", package.branch_name],
+                    f"git checkout -b {package.branch_name}",
+                )
+            )
+        steps.extend(
+            [
+                (["git", "add", *package.changed_files], f"git add {' '.join(package.changed_files)}"),
+                (["git", "commit", "-m", package.commit_message], f"git commit -m {package.commit_message}"),
+            ]
+        )
         for args, display in steps:
             completed = _run(args=args, root=root)
             if completed.returncode != 0:
@@ -290,3 +300,11 @@ def _run(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def _current_branch(root: Path) -> str | None:
+    completed = _run(args=["git", "branch", "--show-current"], root=root)
+    if completed.returncode != 0:
+        return None
+    branch = completed.stdout.strip()
+    return branch or None
