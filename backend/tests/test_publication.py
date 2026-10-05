@@ -61,6 +61,31 @@ def test_publication_preparer_quotes_command_values() -> None:
     ]
 
 
+def test_publication_preparer_reuses_existing_run_branch() -> None:
+    package = PublicationPreparer().prepare(
+        issue="App crashes when destination field is empty.",
+        approval=ApprovalDecision(
+            approved=True,
+            status="approved",
+            summary="Human approval was provided for this reviewed patch.",
+            next_action="commit_changes",
+        ),
+        changed_files=["src/search.py"],
+        issue_number=16,
+        repository="Abhi150904/Wandr",
+        branch_name="repopilot/issue-16-app-crashes",
+        branch_exists=True,
+    )
+
+    assert package.branch_name == "repopilot/issue-16-app-crashes"
+    assert package.pr_url == "https://github.com/Abhi150904/Wandr/pull/new/repopilot/issue-16-app-crashes"
+    assert package.commands == [
+        'git add "src/search.py"',
+        'git commit -m "app crashes when destination field is empty"',
+        'git push -u origin "repopilot/issue-16-app-crashes"',
+    ]
+
+
 def test_publication_preparer_warns_when_no_changed_files_recorded() -> None:
     package = PublicationPreparer().prepare(
         issue="Prepare RepoPilot changes",

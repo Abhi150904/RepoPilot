@@ -81,6 +81,13 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("GITHUB_TOKEN", "REPOPILOT_GITHUB_TOKEN"),
     )
+    workspace_root: str = Field(
+        default=".repopilot/workspaces",
+        validation_alias=AliasChoices(
+            "REPO_PILOT_WORKSPACE_ROOT",
+            "REPOPILOT_WORKSPACE_ROOT",
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

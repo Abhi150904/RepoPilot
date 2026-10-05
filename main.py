@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workspace",
-        help="Local workspace path used with --apply-changes.",
+        help="Local workspace path. Optional in GitHub mode because RepoPilot can create one.",
     )
     parser.add_argument(
         "--run-tests",
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--test-command",
-        nargs="+",
+        nargs=argparse.REMAINDER,
         help="Command tokens to run inside the sandbox, for example: python -m pytest.",
     )
     parser.add_argument(
@@ -78,8 +78,9 @@ def main() -> None:
     args = parse_args()
     workflow = build_workflow()
     initial_state = {"issue": EXAMPLE_ISSUE}
+    github_mode = bool(args.repo or args.issue)
 
-    if args.repo or args.issue:
+    if github_mode:
         if not args.repo or not args.issue:
             raise SystemExit("Both --repo and --issue are required for GitHub mode.")
         initial_state = {"repository": args.repo, "issue_number": args.issue}
@@ -87,17 +88,19 @@ def main() -> None:
     if args.workspace and not (args.apply_changes or args.run_tests):
         raise SystemExit("--workspace can only be used with --apply-changes or --run-tests.")
     if args.apply_changes:
-        if not args.workspace:
+        if not args.workspace and not github_mode:
             raise SystemExit("--workspace is required with --apply-changes.")
         initial_state["apply_changes"] = True
-        initial_state["workspace_path"] = args.workspace
+        if args.workspace:
+            initial_state["workspace_path"] = args.workspace
     if args.run_tests:
-        if not args.workspace:
+        if not args.workspace and not github_mode:
             raise SystemExit("--workspace is required with --run-tests.")
         if args.max_repair_attempts < 0:
             raise SystemExit("--max-repair-attempts cannot be negative.")
         initial_state["run_tests"] = True
-        initial_state["workspace_path"] = args.workspace
+        if args.workspace:
+            initial_state["workspace_path"] = args.workspace
         initial_state["max_repair_attempts"] = args.max_repair_attempts
     if args.test_command:
         if not args.run_tests:
@@ -114,7 +117,7 @@ def main() -> None:
             raise SystemExit("--publish-local requires --approve.")
         if args.publish_dry_run:
             raise SystemExit("--publish-local cannot be combined with --publish-dry-run.")
-        if not args.workspace:
+        if not args.workspace and not github_mode:
             raise SystemExit("--publish-local requires --workspace.")
         initial_state["publish_local"] = True
     if args.publish_push:
@@ -122,7 +125,7 @@ def main() -> None:
             raise SystemExit("--publish-push requires --approve.")
         if args.publish_dry_run:
             raise SystemExit("--publish-push cannot be combined with --publish-dry-run.")
-        if not args.workspace:
+        if not args.workspace and not github_mode:
             raise SystemExit("--publish-push requires --workspace.")
         initial_state["publish_push"] = True
     if args.publish_pr:
@@ -130,7 +133,7 @@ def main() -> None:
             raise SystemExit("--publish-pr requires --approve.")
         if args.publish_dry_run:
             raise SystemExit("--publish-pr cannot be combined with --publish-dry-run.")
-        if not args.workspace:
+        if not args.workspace and not github_mode:
             raise SystemExit("--publish-pr requires --workspace.")
         if not args.repo:
             raise SystemExit("--publish-pr requires --repo.")
@@ -171,6 +174,11 @@ def main() -> None:
         print()
         print("Modified Files:")
         print(json.dumps(result["modified_files"], indent=2))
+
+    if "run_workspace" in result:
+        print()
+        print("Run Workspace:")
+        print(json.dumps(result["run_workspace"], indent=2))
 
     if result.get("diff"):
         print()
