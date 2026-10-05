@@ -13,10 +13,23 @@ dependencies = [
     "httpx>=0.28.0",
 ]
 
+[project.scripts]
+repopilot = "app.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "backend"}
+
+[tool.setuptools.packages.find]
+where = ["backend"]
 
 [tool.pytest.ini_options]
 pythonpath = [
