@@ -9,11 +9,11 @@ from typing import Any, Sequence
 
 from pydantic import ValidationError
 
-from app.api.schemas import RunRequest, RunStatusResponse
+from app.api.schemas import PublishRequest, RunRequest, RunStatusResponse
 from app.core.config import get_settings
 from app.evals import retrieval as retrieval_eval
 from app.evals import runner as eval_runner
-from app.services.run_service import RepoPilotRunService
+from app.services.run_service import RepoPilotRunService, RunServiceError
 
 
 EXAMPLE_ISSUE = "Login endpoint returns 500 when email is missing."
@@ -27,7 +27,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(report, indent=2))
         else:
             _print_config_report(report)
-        return 0
+        return 0 if report["valid"] else 1
     if args.command == "eval":
         return _run_eval_command(args)
 
@@ -36,7 +36,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValidationError as exc:
         raise SystemExit(_validation_message(exc)) from exc
 
-    run = _execute_run(request)
+    run = _execute_run(request=request, args=args)
     if run.lifecycle_status == "failed":
         return _print_failed_run(run=run, json_output=args.json)
     if run.response is None:
@@ -250,8 +250,6 @@ def _workflow_input(args: argparse.Namespace) -> dict[str, Any]:
         data["test_command"] = _default_test_command()
 
     publish_mode = _publish_mode(args)
-    if args.approve:
-        data["approved"] = True
     if publish_mode:
         if not args.approve:
             raise SystemExit("Publication mode requires --approve.")
@@ -259,7 +257,6 @@ def _workflow_input(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit("--publish requires --workspace outside GitHub mode.")
         if publish_mode == "pr" and not args.repo:
             raise SystemExit("--publish pr requires --repo.")
-        data.update(_publish_state(publish_mode))
 
     return data
 
@@ -290,20 +287,30 @@ def _default_test_command() -> list[str]:
     return shlex.split(command)
 
 
-def _publish_state(mode: str) -> dict[str, bool]:
-    return {
-        "dry-run": {"publish_dry_run": True},
-        "local": {"publish_local": True},
-        "push": {"publish_local": True, "publish_push": True},
-        "pr": {"publish_local": True, "publish_push": True, "publish_pr": True},
-    }[mode]
-
-
-def _execute_run(request: RunRequest) -> RunStatusResponse:
+def _execute_run(*, request: RunRequest, args: argparse.Namespace) -> RunStatusResponse:
     service = RepoPilotRunService()
     run = service.create_run(request)
     service.execute_run(run.run_id)
-    return service.get_run(run.run_id)
+    run = service.get_run(run.run_id)
+    if run.lifecycle_status == "failed":
+        return run
+
+    try:
+        if args.approve:
+            run = service.approve_run(run.run_id)
+        publish_mode = _publish_mode(args)
+        if publish_mode:
+            run = service.publish_run(
+                run.run_id,
+                PublishRequest(mode=_publish_request_mode(publish_mode)),
+            )
+    except RunServiceError as exc:
+        raise SystemExit(f"{exc.code}: {exc.message}") from exc
+    return run
+
+
+def _publish_request_mode(mode: str) -> str:
+    return "dry_run" if mode == "dry-run" else mode
 
 
 def _run_eval_command(args: argparse.Namespace) -> int:
@@ -359,8 +366,13 @@ def _config_report() -> dict[str, Any]:
     gemini_required = provider.lower() == "gemini"
     gemini_configured = bool(settings.gemini_api_key)
     github_configured = bool(settings.github_token)
+    issues = []
+    if gemini_required and not gemini_configured:
+        issues.append("GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini.")
 
     return {
+        "valid": not issues,
+        "issues": issues,
         "llm_provider": provider,
         "llm_model": settings.llm_model,
         "gemini_api_key": {
@@ -388,6 +400,7 @@ def _print_config_report(report: dict[str, Any]) -> None:
 
     print("RepoPilot config")
     print()
+    print(f"Status: {'valid' if report['valid'] else 'invalid'}")
     print(f"LLM provider: {report['llm_provider']}")
     print(f"LLM model: {report['llm_model']}")
     print(f"Gemini API key: {gemini.get('status', 'unknown')}")
@@ -398,6 +411,12 @@ def _print_config_report(report: dict[str, Any]) -> None:
     print(f"CLI install: {cli_status}")
     if cli_install.get("path"):
         print(f"CLI path: {cli_install['path']}")
+    issues = report.get("issues")
+    if isinstance(issues, list) and issues:
+        print()
+        print("Issues:")
+        for issue in issues:
+            print(f"- {issue}")
 
 
 def _print_result(result: dict[str, Any]) -> None:

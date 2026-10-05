@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _minimal_result() -> dict[str, object]:
@@ -138,17 +139,47 @@ def test_cli_local_apply_requires_workspace() -> None:
         raise AssertionError("Expected local apply runs to require --workspace.")
 
 
-def test_cli_publish_shorthand_sets_publication_state(monkeypatch) -> None:
+def test_cli_publish_shorthand_uses_hardened_service_lifecycle(monkeypatch) -> None:
     cli = importlib.import_module("app.cli")
-    service_module = importlib.import_module("app.services.run_service")
     captured = {}
 
-    class FakeWorkflow:
-        def invoke(self, state):
-            captured["state"] = state
-            return _minimal_result()
+    def completed_run(result: dict[str, object] | None = None):
+        return SimpleNamespace(
+            run_id="run-1",
+            lifecycle_status="completed",
+            response=SimpleNamespace(result=result or _minimal_result()),
+            error=None,
+        )
 
-    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    class FakeService:
+        def create_run(self, request):
+            captured["request"] = request
+            return SimpleNamespace(run_id="run-1")
+
+        def execute_run(self, run_id):
+            captured["executed"] = run_id
+
+        def get_run(self, run_id):
+            captured["got"] = run_id
+            return completed_run()
+
+        def approve_run(self, run_id):
+            captured["approved"] = run_id
+            return completed_run()
+
+        def publish_run(self, run_id, request):
+            captured["published"] = (run_id, request.mode)
+            result = {
+                **_minimal_result(),
+                "publish_result": {
+                    "status": "published",
+                    "summary": "Dry run passed.",
+                    "mode": request.mode,
+                },
+            }
+            return completed_run(result)
+
+    monkeypatch.setattr(cli, "RepoPilotRunService", FakeService)
 
     exit_code = cli.main(
         [
@@ -166,17 +197,19 @@ def test_cli_publish_shorthand_sets_publication_state(monkeypatch) -> None:
     )
 
     assert exit_code == 0
-    assert captured["state"] == {
-        "repository": "example/demo",
-        "issue_number": 16,
-        "apply_changes": True,
-        "run_tests": True,
-        "test_runner": "docker",
-        "max_repair_attempts": 1,
-        "test_command": ["python", "-m", "pytest"],
-        "approved": True,
-        "publish_dry_run": True,
-    }
+    request = captured["request"]
+    assert request.repository == "example/demo"
+    assert request.issue_number == 16
+    assert request.apply_changes is True
+    assert request.run_tests is True
+    assert request.approved is False
+    assert request.publish_dry_run is False
+    assert request.publish_local is False
+    assert request.publish_push is False
+    assert request.publish_pr is False
+    assert captured["executed"] == "run-1"
+    assert captured["approved"] == "run-1"
+    assert captured["published"] == ("run-1", "dry_run")
 
 
 def test_cli_test_uses_configured_default_command(monkeypatch) -> None:
@@ -198,17 +231,38 @@ def test_cli_test_uses_configured_default_command(monkeypatch) -> None:
     assert captured["state"]["test_command"] == ["pytest", "-q"]
 
 
-def test_cli_dry_run_alias_sets_publication_state(monkeypatch) -> None:
+def test_cli_dry_run_alias_uses_publish_service_mode(monkeypatch) -> None:
     cli = importlib.import_module("app.cli")
-    service_module = importlib.import_module("app.services.run_service")
     captured = {}
 
-    class FakeWorkflow:
-        def invoke(self, state):
-            captured["state"] = state
-            return _minimal_result()
+    def completed_run():
+        return SimpleNamespace(
+            run_id="run-1",
+            lifecycle_status="completed",
+            response=SimpleNamespace(result=_minimal_result()),
+            error=None,
+        )
 
-    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    class FakeService:
+        def create_run(self, request):
+            captured["request"] = request
+            return SimpleNamespace(run_id="run-1")
+
+        def execute_run(self, run_id):
+            pass
+
+        def get_run(self, run_id):
+            return completed_run()
+
+        def approve_run(self, run_id):
+            captured["approved"] = run_id
+            return completed_run()
+
+        def publish_run(self, run_id, request):
+            captured["published"] = request.mode
+            return completed_run()
+
+    monkeypatch.setattr(cli, "RepoPilotRunService", FakeService)
 
     exit_code = cli.main(
         [
@@ -225,17 +279,11 @@ def test_cli_dry_run_alias_sets_publication_state(monkeypatch) -> None:
     )
 
     assert exit_code == 0
-    assert captured["state"] == {
-        "repository": "example/demo",
-        "issue_number": 16,
-        "apply_changes": True,
-        "run_tests": True,
-        "test_runner": "docker",
-        "max_repair_attempts": 1,
-        "test_command": ["python", "-m", "pytest"],
-        "approved": True,
-        "publish_dry_run": True,
-    }
+    request = captured["request"]
+    assert request.approved is False
+    assert request.publish_dry_run is False
+    assert captured["approved"] == "run-1"
+    assert captured["published"] == "dry_run"
 
 
 def test_cli_rejects_publication_without_approval() -> None:
@@ -339,6 +387,7 @@ def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "RepoPilot config" in output
+    assert "Status: valid" in output
     assert "LLM provider: gemini" in output
     assert "LLM model: gemini-test-model" in output
     assert "Gemini API key: configured" in output
@@ -359,6 +408,8 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
 
     body = json.loads(capsys.readouterr().out)
     assert exit_code == 0
+    assert body["valid"] is True
+    assert body["issues"] == []
     assert body["llm_provider"] == "gemini"
     assert body["llm_model"] == "gemini-test-model"
     assert body["gemini_api_key"] == {
@@ -368,6 +419,33 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
     }
     assert body["github_token"]["status"] == "configured"
     assert body["cli_install"] == {"available": False, "path": None}
+
+
+def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
+    monkeypatch,
+    capsys,
+) -> None:
+    cli = importlib.import_module("app.cli")
+
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm_provider="gemini",
+            llm_model="gemini-test-model",
+            gemini_api_key=None,
+            github_token=None,
+            workspace_root=".repopilot/workspaces",
+            default_test_command="python -m pytest",
+        ),
+    )
+
+    exit_code = cli.main(["config", "validate"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Status: invalid" in output
+    assert "GEMINI_API_KEY is required" in output
 
 
 def test_cli_eval_workflow_prints_report(monkeypatch, capsys) -> None:
