@@ -154,8 +154,10 @@ class RunResponse(BaseModel):
 
 
 class RunError(BaseModel):
-    type: str
+    code: str
     message: str
+    type: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):
@@ -170,3 +172,19 @@ class RunStatusResponse(BaseModel):
     request: dict[str, Any]
     response: RunResponse | None = None
     error: RunError | None = None
+
+
+class ApprovalRequest(BaseModel):
+    note: str | None = None
+
+
+class RejectRequest(BaseModel):
+    reason: str | None = None
+
+
+class PublishRequest(BaseModel):
+    mode: Literal["dry_run", "local", "push", "pr"]
+
+
+class MetricsResponse(BaseModel):
+    metrics: dict[str, Any]

@@ -163,6 +163,42 @@ def test_publish_executor_local_reuses_current_branch(tmp_path) -> None:
     assert _git_output(tmp_path, "branch", "--show-current") == "repopilot/issue-16-app-crashes"
 
 
+def test_publish_executor_local_recovers_existing_commit_on_retry(tmp_path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "RepoPilot Test")
+    (tmp_path / "app.py").write_text("print('fixed')\n", encoding="utf-8")
+    package = PublicationPackage(
+        status="ready_to_publish",
+        branch_name="fix-login-validation",
+        commit_message="fix login validation",
+        pr_title="Fix login validation",
+        pr_body="## Summary\n- Fix login validation",
+        changed_files=["app.py"],
+        commands=[
+            'git checkout -b "fix-login-validation"',
+            'git add "app.py"',
+            'git commit -m "fix login validation"',
+            'git push -u origin "fix-login-validation"',
+        ],
+        git_safety=GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+        ),
+        next_action="create_pull_request",
+    )
+    executor = PublishExecutor(workspace_path=str(tmp_path))
+    first = executor.publish_local(package)
+
+    retry = executor.publish_local(package)
+
+    assert first.status == "published"
+    assert retry.status == "published"
+    assert retry.commit_sha == first.commit_sha
+    assert retry.summary == "Local publication was already completed. Reusing the existing commit."
+    assert retry.next_action == "push_branch"
+
+
 def test_publish_executor_local_blocks_without_workspace() -> None:
     result = PublishExecutor().publish_local(
         PublicationPackage(

@@ -72,8 +72,19 @@ class RunStore:
         self._update(
             run_id=run_id,
             lifecycle_status="failed",
-            error=RunError(type=exc.__class__.__name__, message=str(exc)),
+            error=RunError(
+                code=_error_code(exc),
+                type=exc.__class__.__name__,
+                message=str(exc),
+            ),
         )
+
+    def update_response(self, run_id: str, response: RunResponse) -> RunStatusResponse:
+        self._update(run_id=run_id, lifecycle_status="completed", response=response)
+        updated = self.get(run_id)
+        if updated is None:
+            raise KeyError(run_id)
+        return updated
 
     def _update(
         self,
@@ -93,3 +104,14 @@ class RunStore:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _error_code(exc: Exception) -> str:
+    name = exc.__class__.__name__.lower()
+    if "github" in name:
+        return "github_error"
+    if "workspace" in name:
+        return "workspace_error"
+    if "provider" in name or "llm" in name:
+        return "provider_error"
+    return "internal_error"
