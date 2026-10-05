@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import create_app
 from app.core.config import Settings
+from app.schemas.execution import GitSafetyReport
 from app.tools.github import GitHubError
 from app.tools.workspace import WorkspaceError
 
@@ -71,6 +72,8 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
             captured["workflow_input"] = workflow_input
             return {
                 "issue": "Login endpoint returns 500 when email is missing.",
+                "repository": "example/demo",
+                "issue_number": 16,
                 "issue_url": "https://github.com/example/demo/issues/16",
                 "workspace_path": ".repopilot/workspaces/example__demo/runs/repopilot/issue-16",
                 "run_workspace": {
@@ -126,12 +129,19 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
                     "next_action": "review_pull_request",
                 },
                 "run_summary": {
-                    "status": "approved",
-                    "summary": "Tests passed and pull request was opened.",
+                    "status": "awaiting_approval",
+                    "summary": "Tests passed and automated review approved the patch.",
                     "tests_passed": True,
                     "repair_attempts": 0,
-                    "metrics": None,
-                    "next_action": "commit_changes",
+                    "metrics": {
+                        "llm_call_count": 3,
+                        "total_tokens": 42,
+                    },
+                    "next_action": "human_review",
+                },
+                "run_metrics": {
+                    "llm_call_count": 3,
+                    "total_tokens": 42,
                 },
             }
 
@@ -173,9 +183,9 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
     assert get_response.status_code == 200
     body = get_response.json()["response"]
     assert get_response.json()["lifecycle_status"] == "completed"
-    assert body["status"] == "approved"
-    assert body["next_action"] == "commit_changes"
-    assert body["summary"] == "Tests passed and pull request was opened."
+    assert body["status"] == "awaiting_approval"
+    assert body["next_action"] == "human_review"
+    assert body["summary"] == "Tests passed and automated review approved the patch."
     assert body["artifacts"] == {
         "issue_url": "https://github.com/example/demo/issues/16",
         "workspace_path": ".repopilot/workspaces/example__demo/runs/repopilot/issue-16",
@@ -231,6 +241,17 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
     }
     assert body["result"]["modified_files"] == ["app.py"]
 
+    result_response = client.get(f"/runs/{start_body['run_id']}/result")
+    assert result_response.status_code == 200
+    assert result_response.json()["status"] == "awaiting_approval"
+
+    metrics_response = client.get(f"/runs/{start_body['run_id']}/metrics")
+    assert metrics_response.status_code == 200
+    assert metrics_response.json()["metrics"] == {
+        "llm_call_count": 3,
+        "total_tokens": 42,
+    }
+
 
 def test_get_run_returns_404_for_unknown_run() -> None:
     client = TestClient(create_app())
@@ -240,10 +261,107 @@ def test_get_run_returns_404_for_unknown_run() -> None:
     assert response.status_code == 404
     assert response.json() == {
         "error": {
-            "type": "http_error",
+            "code": "run_not_found",
             "message": "Run not found.",
+            "type": "run_not_found",
+            "details": {},
         }
     }
+
+
+def test_approve_run_updates_completed_run(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            return _reviewed_run_result()
+
+    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app())
+    started = client.post("/runs", json={"issue": "Login endpoint fails"})
+
+    response = client.post(f"/runs/{started.json()['run_id']}/approve", json={"note": "ship it"})
+
+    assert response.status_code == 200
+    run = response.json()
+    assert run["lifecycle_status"] == "completed"
+    assert run["response"]["status"] == "approved"
+    assert run["response"]["next_action"] == "commit_changes"
+    assert run["response"]["result"]["approval_decision"]["approved"] is True
+    assert run["response"]["result"]["approval_note"] == "ship it"
+
+
+def test_reject_run_updates_completed_run(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            return _reviewed_run_result()
+
+    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app())
+    started = client.post("/runs", json={"issue": "Login endpoint fails"})
+
+    response = client.post(
+        f"/runs/{started.json()['run_id']}/reject",
+        json={"reason": "Need a safer test plan."},
+    )
+
+    assert response.status_code == 200
+    run = response.json()
+    assert run["response"]["status"] == "needs_human"
+    assert run["response"]["next_action"] == "inspect_failure"
+    assert run["response"]["result"]["approval_decision"]["approved"] is False
+    assert run["response"]["result"]["rejection_reason"] == "Need a safer test plan."
+
+
+def test_publish_requires_approval(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            return _reviewed_run_result()
+
+    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app())
+    started = client.post("/runs", json={"issue": "Login endpoint fails"})
+
+    response = client.post(f"/runs/{started.json()['run_id']}/publish", json={"mode": "dry_run"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "approval_required"
+
+
+def test_publish_dry_run_updates_run_after_approval(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            result = _reviewed_run_result()
+            result["workspace_path"] = "."
+            result["modified_files"] = ["app.py"]
+            return result
+
+    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(
+        api_module,
+        "inspect_git_safety",
+        lambda workspace_path, expected_changed_files: GitSafetyReport(
+            status="safe",
+            summary="Git safety check found only RepoPilot-applied changes.",
+        ),
+    )
+    client = TestClient(api_module.create_app())
+    started = client.post("/runs", json={"issue": "Login endpoint fails"})
+    client.post(f"/runs/{started.json()['run_id']}/approve", json={})
+
+    response = client.post(f"/runs/{started.json()['run_id']}/publish", json={"mode": "dry_run"})
+
+    assert response.status_code == 200
+    publish_result = response.json()["response"]["result"]["publish_result"]
+    assert publish_result["mode"] == "dry_run"
+    assert publish_result["status"] == "ready"
+    assert response.json()["response"]["artifacts"]["publish_result"]["mode"] == "dry_run"
 
 
 def test_create_run_validates_required_issue_input() -> None:
@@ -252,7 +370,7 @@ def test_create_run_validates_required_issue_input() -> None:
     response = client.post("/runs", json={})
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert "Either issue or repository and issue_number" in response.json()["error"]["message"]
 
 
@@ -265,7 +383,7 @@ def test_create_run_rejects_local_apply_without_workspace() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert (
         "workspace_path is required for local apply_changes or run_tests"
         in response.json()["error"]["message"]
@@ -286,7 +404,7 @@ def test_create_run_rejects_empty_test_command() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert "test_command cannot be empty" in response.json()["error"]["message"]
 
 
@@ -304,7 +422,7 @@ def test_create_run_rejects_blank_command_token() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert "test_command tokens cannot be blank" in response.json()["error"]["message"]
 
 
@@ -322,7 +440,7 @@ def test_create_run_rejects_publication_without_apply_and_tests() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert "publication requires apply_changes=true" in response.json()["error"]["message"]
 
 
@@ -342,7 +460,7 @@ def test_create_run_rejects_publish_push_without_local_publish() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert "publish_push requires publish_local=true" in response.json()["error"]["message"]
 
 
@@ -362,7 +480,7 @@ def test_create_run_rejects_publish_pr_without_push() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
+    assert response.json()["error"]["code"] == "validation_error"
     assert "publish_pr requires publish_push=true" in response.json()["error"]["message"]
 
 
@@ -384,6 +502,7 @@ def test_create_run_stores_github_errors(monkeypatch) -> None:
     assert response.status_code == 202
     run = client.get(f"/runs/{response.json()['run_id']}").json()
     assert run["lifecycle_status"] == "failed"
+    assert run["error"]["code"] == "github_error"
     assert run["error"]["type"] == "GitHubError"
     assert "Bad credentials" in run["error"]["message"]
 
@@ -406,5 +525,34 @@ def test_create_run_stores_workspace_errors(monkeypatch) -> None:
     assert response.status_code == 202
     run = client.get(f"/runs/{response.json()['run_id']}").json()
     assert run["lifecycle_status"] == "failed"
+    assert run["error"]["code"] == "workspace_error"
     assert run["error"]["type"] == "WorkspaceError"
     assert "already exists" in run["error"]["message"]
+
+
+def _reviewed_run_result() -> dict[str, object]:
+    return {
+        "issue": "Login endpoint returns 500 when email is missing.",
+        "modified_files": ["app.py"],
+        "diff": "--- app.py\n+++ app.py\n",
+        "test_analysis": {
+            "status": "passed",
+            "summary": "Tests passed.",
+            "failure_reason": None,
+            "next_action": "ready_for_review",
+        },
+        "review_result": {
+            "approved": True,
+            "summary": "Patch looks good.",
+            "findings": [],
+            "next_action": "await_human_approval",
+        },
+        "run_summary": {
+            "status": "awaiting_approval",
+            "summary": "Tests passed and automated review approved the patch.",
+            "tests_passed": True,
+            "repair_attempts": 0,
+            "metrics": None,
+            "next_action": "human_review",
+        },
+    }
