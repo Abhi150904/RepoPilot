@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.api.app import create_app
 from app.core.config import Settings
 from app.schemas.execution import GitSafetyReport
+import app.services.run_service as service_module
 from app.tools.github import GitHubError
 from app.tools.workspace import WorkspaceError
 
@@ -145,7 +146,7 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
                 },
             }
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     client = TestClient(api_module.create_app())
 
     response = client.post(
@@ -276,7 +277,7 @@ def test_approve_run_updates_completed_run(monkeypatch) -> None:
         def invoke(self, workflow_input):
             return _reviewed_run_result()
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     client = TestClient(api_module.create_app())
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
 
@@ -298,7 +299,7 @@ def test_reject_run_updates_completed_run(monkeypatch) -> None:
         def invoke(self, workflow_input):
             return _reviewed_run_result()
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     client = TestClient(api_module.create_app())
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
 
@@ -322,7 +323,7 @@ def test_publish_requires_approval(monkeypatch) -> None:
         def invoke(self, workflow_input):
             return _reviewed_run_result()
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     client = TestClient(api_module.create_app())
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
 
@@ -342,9 +343,9 @@ def test_publish_dry_run_updates_run_after_approval(monkeypatch) -> None:
             result["modified_files"] = ["app.py"]
             return result
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     monkeypatch.setattr(
-        api_module,
+        service_module,
         "inspect_git_safety",
         lambda workspace_path, expected_changed_files: GitSafetyReport(
             status="safe",
@@ -491,7 +492,7 @@ def test_create_run_stores_github_errors(monkeypatch) -> None:
         def invoke(self, workflow_input):
             raise GitHubError("GitHub request failed: 401 Bad credentials")
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     client = TestClient(api_module.create_app())
 
     response = client.post(
@@ -514,7 +515,7 @@ def test_create_run_stores_workspace_errors(monkeypatch) -> None:
         def invoke(self, workflow_input):
             raise WorkspaceError("Run workspace already exists")
 
-    monkeypatch.setattr(api_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
     client = TestClient(api_module.create_app())
 
     response = client.post(
@@ -556,3 +557,4 @@ def _reviewed_run_result() -> dict[str, object]:
             "next_action": "human_review",
         },
     }
+
