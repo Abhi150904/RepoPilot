@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+from time import perf_counter
+from uuid import uuid4
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,13 +15,14 @@ from app.api.schemas import (
     HealthResponse,
     MetricsResponse,
     PublishRequest,
+    ReadinessResponse,
     RejectRequest,
     RunError,
     RunRequest,
     RunResponse,
     RunStatusResponse,
 )
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, readiness_report
 from app.services.run_service import RepoPilotRunService, RunServiceError
 
 
@@ -35,6 +40,27 @@ def create_app(
         allow_headers=["*"],
     )
     run_service = service or RepoPilotRunService()
+    api_logger = logging.getLogger("repopilot.api")
+
+    @api.middleware("http")
+    async def request_context_middleware(request: Request, call_next):
+        request_id = request.headers.get("x-request-id") or uuid4().hex
+        request.state.request_id = request_id
+        started_at = perf_counter()
+        response = await call_next(request)
+        response.headers["x-request-id"] = request_id
+        _apply_security_headers(response.headers)
+        api_logger.info(
+            "request_completed",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
+        return response
 
     @api.exception_handler(HTTPException)
     def http_exception_handler(
@@ -45,6 +71,7 @@ def create_app(
             status_code=exc.status_code,
             error_type=_error_code(exc.detail, "http_error"),
             message=_error_message(exc.detail),
+            request_id=_request_id(request),
         )
 
     @api.exception_handler(RunServiceError)
@@ -56,6 +83,7 @@ def create_app(
             status_code=exc.status_code,
             error_type=exc.code,
             message=exc.message,
+            request_id=_request_id(request),
         )
 
     @api.exception_handler(RequestValidationError)
@@ -67,11 +95,20 @@ def create_app(
             status_code=422,
             error_type="validation_error",
             message=_validation_message(exc),
+            request_id=_request_id(request),
         )
 
     @api.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", service="repopilot")
+
+    @api.get("/ready", response_model=ReadinessResponse)
+    def ready() -> JSONResponse:
+        report = ReadinessResponse.model_validate(readiness_report(config))
+        return JSONResponse(
+            status_code=status.HTTP_200_OK if report.status == "ready" else status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=report.model_dump(),
+        )
 
     @api.post(
         "/runs",
@@ -82,8 +119,9 @@ def create_app(
     def create_run(
         request: RunRequest,
         background_tasks: BackgroundTasks,
+        http_request: Request,
     ) -> RunStatusResponse:
-        run = run_service.create_run(request)
+        run = run_service.create_run(request, request_id=_request_id(http_request))
         background_tasks.add_task(run_service.execute_run, run.run_id)
         return run
 
@@ -143,11 +181,16 @@ def _error_response(
     status_code: int,
     error_type: str,
     message: str,
+    request_id: str | None = None,
 ) -> JSONResponse:
-    payload = ErrorResponse(error=RunError(code=error_type, message=message, type=error_type))
+    details = {"request_id": request_id} if request_id else {}
+    payload = ErrorResponse(
+        error=RunError(code=error_type, message=message, type=error_type, details=details)
+    )
     return JSONResponse(
         status_code=status_code,
         content=payload.model_dump(),
+        headers={"cache-control": "no-store"},
     )
 
 
@@ -181,6 +224,18 @@ def _validation_message(exc: RequestValidationError) -> str:
 
 def _cors_origins(value: str) -> list[str]:
     return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+
+def _request_id(request: Request) -> str | None:
+    value = getattr(request.state, "request_id", None)
+    return value if isinstance(value, str) else None
+
+
+def _apply_security_headers(headers) -> None:
+    headers.setdefault("x-content-type-options", "nosniff")
+    headers.setdefault("x-frame-options", "DENY")
+    headers.setdefault("referrer-policy", "no-referrer")
+    headers.setdefault("cache-control", "no-store")
 
 
 app = create_app()

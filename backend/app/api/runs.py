@@ -68,14 +68,16 @@ class RunStore:
     def mark_completed(self, run_id: str, response: RunResponse) -> None:
         self._update(run_id=run_id, lifecycle_status="completed", response=response)
 
-    def mark_failed(self, run_id: str, exc: Exception) -> None:
+    def mark_failed(self, run_id: str, exc: Exception, *, request_id: str | None = None) -> None:
+        details = {"request_id": request_id} if request_id else {}
         self._update(
             run_id=run_id,
             lifecycle_status="failed",
             error=RunError(
                 code=_error_code(exc),
                 type=exc.__class__.__name__,
-                message=str(exc),
+                message=_safe_error_message(exc),
+                details=details,
             ),
         )
 
@@ -115,3 +117,14 @@ def _error_code(exc: Exception) -> str:
     if "provider" in name or "llm" in name:
         return "provider_error"
     return "internal_error"
+
+
+def _safe_error_message(exc: Exception) -> str:
+    code = _error_code(exc)
+    if code == "github_error":
+        return "GitHub operation failed. Check repository access and token configuration."
+    if code == "workspace_error":
+        return "Workspace operation failed. Check workspace state and permissions."
+    if code == "provider_error":
+        return "Model provider operation failed. Check provider configuration."
+    return "Run failed unexpectedly. Check server logs with the request or run ID."

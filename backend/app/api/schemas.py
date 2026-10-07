@@ -11,6 +11,15 @@ class HealthResponse(BaseModel):
     service: Literal["repopilot"]
 
 
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "degraded"]
+    service: Literal["repopilot"]
+    environment: str
+    hosted_mode: bool
+    checks: dict[str, bool]
+    warnings: list[str] = Field(default_factory=list)
+
+
 class RunRequest(BaseModel):
     issue: str | None = None
     repository: str | None = None
