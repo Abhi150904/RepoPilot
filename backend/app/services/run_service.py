@@ -21,6 +21,16 @@ from app.api.schemas import (
     RunResponse,
     RunStatusResponse,
 )
+from app.core.audit import (
+    RUN_APPROVED,
+    RUN_COMPLETED,
+    RUN_CREATED,
+    RUN_FAILED,
+    RUN_PUBLISHED,
+    RUN_REJECTED,
+    RUN_STARTED,
+    AuditLogger,
+)
 from app.graph.workflow import build_workflow
 from app.schemas.execution import ApprovalDecision, PublicationPackage, PublishResult, ReviewResult
 from app.tools.git import inspect_git_safety
@@ -36,23 +46,53 @@ class RunServiceError(Exception):
 
 
 class RepoPilotRunService:
-    def __init__(self, run_store: RunStore | None = None) -> None:
+    def __init__(
+        self,
+        run_store: RunStore | None = None,
+        audit_logger: AuditLogger | None = None,
+    ) -> None:
         self.run_store = run_store or RunStore()
+        self.audit_logger = audit_logger or AuditLogger()
         self._transition_lock = Lock()
 
     def create_run(self, request: RunRequest) -> RunStatusResponse:
-        return self.run_store.create(_workflow_input(request))
+        run = self.run_store.create(_workflow_input(request))
+        self.audit_logger.record(
+            RUN_CREATED,
+            run_id=run.run_id,
+            metadata={"request": _audit_request_metadata(run.request)},
+        )
+        return run
 
     def execute_run(self, run_id: str) -> None:
         run = self.run_store.get(run_id)
         if run is None:
             return
         self.run_store.mark_running(run_id)
+        self.audit_logger.record(RUN_STARTED, run_id=run_id)
         try:
             result = build_workflow().invoke(run.request)
-            self.run_store.mark_completed(run_id, _run_response(result))
+            response = _run_response(result)
+            self.run_store.mark_completed(run_id, response)
+            self.audit_logger.record(
+                RUN_COMPLETED,
+                run_id=run_id,
+                metadata={
+                    "status": response.status,
+                    "next_action": response.next_action,
+                    "changed_files": response.artifacts.changed_files,
+                },
+            )
         except Exception as exc:
             self.run_store.mark_failed(run_id, exc)
+            self.audit_logger.record(
+                RUN_FAILED,
+                run_id=run_id,
+                metadata={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": _audit_error_code(exc),
+                },
+            )
 
     def get_run(self, run_id: str) -> RunStatusResponse:
         run = self.run_store.get(run_id)
@@ -78,7 +118,14 @@ class RepoPilotRunService:
             if request and request.note:
                 result["approval_note"] = request.note
             result["run_summary"] = RunSummarizer().summarize(result).model_dump()
-            return self.run_store.update_response(run_id, _run_response(result))
+            updated = self.run_store.update_response(run_id, _run_response(result))
+            self.audit_logger.record(
+                RUN_APPROVED,
+                run_id=run_id,
+                actor="human",
+                metadata={"has_note": bool(request and request.note)},
+            )
+            return updated
 
     def reject_run(
         self,
@@ -106,7 +153,14 @@ class RepoPilotRunService:
                 }
             )
             result["run_summary"] = summary
-            return self.run_store.update_response(run_id, _run_response(result))
+            updated = self.run_store.update_response(run_id, _run_response(result))
+            self.audit_logger.record(
+                RUN_REJECTED,
+                run_id=run_id,
+                actor="human",
+                metadata={"has_reason": bool(request and request.reason)},
+            )
+            return updated
 
     def publish_run(self, run_id: str, request: PublishRequest) -> RunStatusResponse:
         with self._transition_lock:
@@ -130,7 +184,18 @@ class RepoPilotRunService:
             result["publication_package"] = package.model_dump()
             result["publish_result"] = publish_result.model_dump()
             result["run_summary"] = RunSummarizer().summarize(result).model_dump()
-            return self.run_store.update_response(run_id, _run_response(result))
+            updated = self.run_store.update_response(run_id, _run_response(result))
+            self.audit_logger.record(
+                RUN_PUBLISHED,
+                run_id=run_id,
+                metadata={
+                    "mode": request.mode,
+                    "status": publish_result.status,
+                    "branch_name": publish_result.branch_name,
+                    "pr_url": publish_result.pr_url,
+                },
+            )
+            return updated
 
     def get_metrics(self, run_id: str) -> MetricsResponse:
         response = self._completed_response(run_id)
@@ -177,6 +242,20 @@ def _workflow_input(request: RunRequest) -> dict[str, Any]:
         if value not in (None, False):
             data[key] = value
     return data
+
+
+def _audit_request_metadata(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": "github" if "repository" in request else "issue_text",
+        "repository": _string_or_none(request.get("repository")),
+        "issue_number": request.get("issue_number") if isinstance(request.get("issue_number"), int) else None,
+        "apply_changes": request.get("apply_changes") is True,
+        "run_tests": request.get("run_tests") is True,
+        "publication_requested": any(
+            request.get(key) is True
+            for key in ("publish_dry_run", "publish_local", "publish_push", "publish_pr")
+        ),
+    }
 
 
 def _run_response(result: dict[str, Any]) -> RunResponse:
@@ -466,3 +545,14 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def _audit_error_code(exc: Exception) -> str:
+    name = exc.__class__.__name__.lower()
+    if "github" in name:
+        return "github_error"
+    if "workspace" in name:
+        return "workspace_error"
+    if "provider" in name or "llm" in name:
+        return "provider_error"
+    return "internal_error"

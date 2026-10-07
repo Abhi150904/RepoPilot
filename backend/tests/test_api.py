@@ -21,6 +21,55 @@ def test_health_endpoint_returns_ok() -> None:
     assert response.json() == {"status": "ok", "service": "repopilot"}
 
 
+def test_api_returns_request_id_header() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/health", headers={"x-request-id": "trace-123"})
+
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == "trace-123"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_ready_endpoint_reports_local_readiness() -> None:
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["service"] == "repopilot"
+    assert body["hosted_mode"] is False
+    assert body["checks"]["cors_configured"] is True
+
+
+def test_ready_endpoint_warns_about_unsafe_hosted_token() -> None:
+    client = TestClient(
+        create_app(
+            settings=Settings(
+                hosted_mode=True,
+                github_token="github-secret",
+                cors_origins="*",
+                _env_file=None,
+            )
+        )
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert "github-secret" not in response.text
+    assert any("GitHub App/OAuth" in warning for warning in body["warnings"])
+    assert any("Wildcard CORS" in warning for warning in body["warnings"])
+
+
 def test_api_allows_configured_cors_origin() -> None:
     client = TestClient(
         create_app(
@@ -274,15 +323,16 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
 def test_get_run_returns_404_for_unknown_run() -> None:
     client = TestClient(create_app())
 
-    response = client.get("/runs/missing")
+    response = client.get("/runs/missing", headers={"x-request-id": "trace-404"})
 
     assert response.status_code == 404
+    assert response.headers["x-request-id"] == "trace-404"
     assert response.json() == {
         "error": {
             "code": "run_not_found",
             "message": "Run not found.",
             "type": "run_not_found",
-            "details": {},
+            "details": {"request_id": "trace-404"},
         }
     }
 
@@ -415,10 +465,12 @@ def test_publish_rejects_workspace_changed_after_approval(tmp_path, monkeypatch)
 def test_create_run_validates_required_issue_input() -> None:
     client = TestClient(create_app())
 
-    response = client.post("/runs", json={})
+    response = client.post("/runs", json={}, headers={"x-request-id": "trace-validation"})
 
     assert response.status_code == 422
+    assert response.headers["x-request-id"] == "trace-validation"
     assert response.json()["error"]["code"] == "validation_error"
+    assert response.json()["error"]["details"]["request_id"] == "trace-validation"
     assert "Either issue or repository and issue_number" in response.json()["error"]["message"]
 
 

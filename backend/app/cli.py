@@ -10,7 +10,7 @@ from typing import Any, Sequence
 from pydantic import ValidationError
 
 from app.api.schemas import PublishRequest, RunRequest, RunStatusResponse
-from app.core.config import get_settings
+from app.core.config import deployment_issues, deployment_warnings, get_settings
 from app.evals import retrieval as retrieval_eval
 from app.evals import runner as eval_runner
 from app.services.run_service import RepoPilotRunService, RunServiceError
@@ -369,10 +369,16 @@ def _config_report() -> dict[str, Any]:
     issues = []
     if gemini_required and not gemini_configured:
         issues.append("GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini.")
+    issues.extend(deployment_issues(settings))
+    warnings = deployment_warnings(settings)
 
     return {
         "valid": not issues,
         "issues": issues,
+        "warnings": warnings,
+        "deployment_environment": settings.deployment_environment,
+        "hosted_mode": settings.hosted_mode,
+        "public_base_url": settings.public_base_url,
         "llm_provider": provider,
         "llm_model": settings.llm_model,
         "gemini_api_key": {
@@ -401,6 +407,10 @@ def _print_config_report(report: dict[str, Any]) -> None:
     print("RepoPilot config")
     print()
     print(f"Status: {'valid' if report['valid'] else 'invalid'}")
+    print(f"Environment: {report['deployment_environment']}")
+    print(f"Hosted mode: {'enabled' if report['hosted_mode'] else 'disabled'}")
+    if report.get("public_base_url"):
+        print(f"Public URL: {report['public_base_url']}")
     print(f"LLM provider: {report['llm_provider']}")
     print(f"LLM model: {report['llm_model']}")
     print(f"Gemini API key: {gemini.get('status', 'unknown')}")
@@ -417,6 +427,12 @@ def _print_config_report(report: dict[str, Any]) -> None:
         print("Issues:")
         for issue in issues:
             print(f"- {issue}")
+    warnings = report.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        print()
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
 
 
 def _print_result(result: dict[str, Any]) -> None:

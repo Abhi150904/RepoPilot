@@ -388,6 +388,8 @@ def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
     assert exit_code == 0
     assert "RepoPilot config" in output
     assert "Status: valid" in output
+    assert "Environment: local" in output
+    assert "Hosted mode: disabled" in output
     assert "LLM provider: gemini" in output
     assert "LLM model: gemini-test-model" in output
     assert "Gemini API key: configured" in output
@@ -410,6 +412,10 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
     assert exit_code == 0
     assert body["valid"] is True
     assert body["issues"] == []
+    assert body["warnings"] == []
+    assert body["deployment_environment"] == "local"
+    assert body["hosted_mode"] is False
+    assert body["public_base_url"] is None
     assert body["llm_provider"] == "gemini"
     assert body["llm_model"] == "gemini-test-model"
     assert body["gemini_api_key"] == {
@@ -435,6 +441,10 @@ def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
             llm_model="gemini-test-model",
             gemini_api_key=None,
             github_token=None,
+            deployment_environment="local",
+            hosted_mode=False,
+            public_base_url=None,
+            cors_origins="http://localhost:3000",
             workspace_root=".repopilot/workspaces",
             default_test_command="python -m pytest",
         ),
@@ -446,6 +456,38 @@ def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
     assert exit_code == 1
     assert "Status: invalid" in output
     assert "GEMINI_API_KEY is required" in output
+
+
+def test_cli_config_validate_rejects_hosted_personal_token(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+
+    monkeypatch.setenv("REPO_PILOT_HOSTED_MODE", "true")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+
+    exit_code = cli.main(["config", "validate", "--json"])
+
+    body = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert body["valid"] is False
+    assert "github-secret" not in json.dumps(body)
+    assert any("personal GitHub token" in issue for issue in body["issues"])
+    assert any("GitHub App/OAuth" in warning for warning in body["warnings"])
+
+
+def test_cli_config_validate_rejects_hosted_wildcard_cors(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+
+    monkeypatch.setenv("REPO_PILOT_HOSTED_MODE", "true")
+    monkeypatch.setenv("REPO_PILOT_CORS_ORIGINS", "*")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("REPOPILOT_GITHUB_TOKEN", raising=False)
+
+    exit_code = cli.main(["config", "validate"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Status: invalid" in output
+    assert "REPO_PILOT_CORS_ORIGINS cannot include * in hosted mode." in output
 
 
 def test_cli_eval_workflow_prints_report(monkeypatch, capsys) -> None:

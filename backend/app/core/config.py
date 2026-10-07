@@ -109,6 +109,27 @@ class Settings(BaseSettings):
             "REPOPILOT_CORS_ORIGINS",
         ),
     )
+    deployment_environment: str = Field(
+        default="local",
+        validation_alias=AliasChoices(
+            "REPO_PILOT_DEPLOYMENT_ENVIRONMENT",
+            "REPOPILOT_DEPLOYMENT_ENVIRONMENT",
+        ),
+    )
+    hosted_mode: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_HOSTED_MODE",
+            "REPOPILOT_HOSTED_MODE",
+        ),
+    )
+    public_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_PUBLIC_BASE_URL",
+            "REPOPILOT_PUBLIC_BASE_URL",
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -120,3 +141,46 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def deployment_warnings(settings: Settings) -> list[str]:
+    warnings: list[str] = []
+    if settings.hosted_mode and settings.github_token:
+        warnings.append("Hosted mode should use GitHub App/OAuth instead of a personal GitHub token.")
+    if settings.hosted_mode and not settings.public_base_url:
+        warnings.append("Hosted mode should set REPO_PILOT_PUBLIC_BASE_URL.")
+    if "*" in _cors_origins(settings.cors_origins):
+        warnings.append("Wildcard CORS origins are not recommended outside local development.")
+    return warnings
+
+
+def deployment_issues(settings: Settings) -> list[str]:
+    issues: list[str] = []
+    if settings.hosted_mode and settings.github_token:
+        issues.append("REPO_PILOT_HOSTED_MODE=true cannot be used with a personal GitHub token.")
+    if settings.hosted_mode and "*" in _cors_origins(settings.cors_origins):
+        issues.append("REPO_PILOT_CORS_ORIGINS cannot include * in hosted mode.")
+    return issues
+
+
+def readiness_report(settings: Settings) -> dict[str, object]:
+    checks = {
+        "cors_configured": bool(_cors_origins(settings.cors_origins)),
+        "llm_provider_configured": bool(settings.llm_provider),
+        "workspace_root_configured": bool(settings.workspace_root),
+    }
+    warnings = deployment_warnings(settings)
+    issues = deployment_issues(settings)
+    ready = all(checks.values()) and not issues
+    return {
+        "status": "ready" if ready else "degraded",
+        "service": "repopilot",
+        "environment": settings.deployment_environment,
+        "hosted_mode": settings.hosted_mode,
+        "checks": checks,
+        "warnings": warnings,
+    }
+
+
+def _cors_origins(value: str) -> list[str]:
+    return [origin.strip() for origin in value.split(",") if origin.strip()]
