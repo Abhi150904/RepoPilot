@@ -43,6 +43,21 @@ def test_api_allows_configured_cors_origin() -> None:
     assert response.headers["access-control-allow-origin"] == "http://frontend.test"
 
 
+def test_api_allows_next_fallback_dev_port_by_default() -> None:
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
+
+    response = client.options(
+        "/health",
+        headers={
+            "Origin": "http://localhost:3001",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3001"
+
+
 def test_openapi_includes_run_request_examples() -> None:
     client = TestClient(create_app(settings=Settings(_env_file=None)))
 
