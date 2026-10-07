@@ -604,7 +604,10 @@ def test_create_run_stores_github_errors(monkeypatch) -> None:
     assert run["lifecycle_status"] == "failed"
     assert run["error"]["code"] == "github_error"
     assert run["error"]["type"] == "GitHubError"
-    assert "Bad credentials" in run["error"]["message"]
+    assert run["error"]["message"] == (
+        "GitHub operation failed. Check repository access and token configuration."
+    )
+    assert "Bad credentials" not in run["error"]["message"]
 
 
 def test_create_run_stores_workspace_errors(monkeypatch) -> None:
@@ -627,7 +630,38 @@ def test_create_run_stores_workspace_errors(monkeypatch) -> None:
     assert run["lifecycle_status"] == "failed"
     assert run["error"]["code"] == "workspace_error"
     assert run["error"]["type"] == "WorkspaceError"
-    assert "already exists" in run["error"]["message"]
+    assert run["error"]["message"] == (
+        "Workspace operation failed. Check workspace state and permissions."
+    )
+    assert "already exists" not in run["error"]["message"]
+
+
+def test_failed_run_error_keeps_request_id_and_hides_raw_exception(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            raise RuntimeError("secret-token leaked in exception")
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app())
+
+    response = client.post(
+        "/runs",
+        json={"issue": "Login endpoint fails"},
+        headers={"x-request-id": "trace-run-failed"},
+    )
+
+    assert response.status_code == 202
+    run = client.get(f"/runs/{response.json()['run_id']}").json()
+    assert run["lifecycle_status"] == "failed"
+    assert run["error"]["code"] == "internal_error"
+    assert run["error"]["type"] == "RuntimeError"
+    assert run["error"]["details"]["request_id"] == "trace-run-failed"
+    assert run["error"]["message"] == (
+        "Run failed unexpectedly. Check server logs with the request or run ID."
+    )
+    assert "secret-token" not in str(run)
 
 
 def _reviewed_run_result() -> dict[str, object]:

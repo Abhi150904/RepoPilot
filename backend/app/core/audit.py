@@ -25,6 +25,7 @@ RUN_PUBLISHED = "run.published"
 class AuditEvent:
     event_type: str
     actor: str = "system"
+    actor_context: dict[str, Any] = field(default_factory=dict)
     run_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -36,6 +37,8 @@ class AuditEvent:
             "created_at": self.created_at,
             "metadata": _sanitize(self.metadata),
         }
+        if self.actor_context:
+            payload["actor_context"] = _sanitize(self.actor_context)
         if self.run_id:
             payload["run_id"] = self.run_id
         return payload
@@ -51,11 +54,13 @@ class AuditLogger:
         *,
         run_id: str | None = None,
         actor: str = "system",
+        actor_context: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AuditEvent:
         event = AuditEvent(
             event_type=event_type,
             actor=actor,
+            actor_context=actor_context or {},
             run_id=run_id,
             metadata=metadata or {},
         )

@@ -53,14 +53,20 @@ class RepoPilotRunService:
     ) -> None:
         self.run_store = run_store or RunStore()
         self.audit_logger = audit_logger or AuditLogger()
+        self._request_ids: dict[str, str] = {}
         self._transition_lock = Lock()
 
-    def create_run(self, request: RunRequest) -> RunStatusResponse:
+    def create_run(self, request: RunRequest, *, request_id: str | None = None) -> RunStatusResponse:
         run = self.run_store.create(_workflow_input(request))
+        if request_id:
+            self._request_ids[run.run_id] = request_id
         self.audit_logger.record(
             RUN_CREATED,
             run_id=run.run_id,
-            metadata={"request": _audit_request_metadata(run.request)},
+            metadata={
+                **_trace_metadata(run_id=run.run_id, request_id=request_id),
+                "request": _audit_request_metadata(run.request),
+            },
         )
         return run
 
@@ -68,8 +74,13 @@ class RepoPilotRunService:
         run = self.run_store.get(run_id)
         if run is None:
             return
+        request_id = self._request_ids.get(run_id)
         self.run_store.mark_running(run_id)
-        self.audit_logger.record(RUN_STARTED, run_id=run_id)
+        self.audit_logger.record(
+            RUN_STARTED,
+            run_id=run_id,
+            metadata=_trace_metadata(run_id=run_id, request_id=request_id),
+        )
         try:
             result = build_workflow().invoke(run.request)
             response = _run_response(result)
@@ -78,17 +89,19 @@ class RepoPilotRunService:
                 RUN_COMPLETED,
                 run_id=run_id,
                 metadata={
+                    **_trace_metadata(run_id=run_id, request_id=request_id),
                     "status": response.status,
                     "next_action": response.next_action,
                     "changed_files": response.artifacts.changed_files,
                 },
             )
         except Exception as exc:
-            self.run_store.mark_failed(run_id, exc)
+            self.run_store.mark_failed(run_id, exc, request_id=request_id)
             self.audit_logger.record(
                 RUN_FAILED,
                 run_id=run_id,
                 metadata={
+                    **_trace_metadata(run_id=run_id, request_id=request_id),
                     "error_type": exc.__class__.__name__,
                     "error_code": _audit_error_code(exc),
                 },
@@ -123,7 +136,10 @@ class RepoPilotRunService:
                 RUN_APPROVED,
                 run_id=run_id,
                 actor="human",
-                metadata={"has_note": bool(request and request.note)},
+                metadata={
+                    **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
+                    "has_note": bool(request and request.note),
+                },
             )
             return updated
 
@@ -158,7 +174,10 @@ class RepoPilotRunService:
                 RUN_REJECTED,
                 run_id=run_id,
                 actor="human",
-                metadata={"has_reason": bool(request and request.reason)},
+                metadata={
+                    **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
+                    "has_reason": bool(request and request.reason),
+                },
             )
             return updated
 
@@ -189,6 +208,7 @@ class RepoPilotRunService:
                 RUN_PUBLISHED,
                 run_id=run_id,
                 metadata={
+                    **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
                     "mode": request.mode,
                     "status": publish_result.status,
                     "branch_name": publish_result.branch_name,
@@ -256,6 +276,13 @@ def _audit_request_metadata(request: dict[str, Any]) -> dict[str, Any]:
             for key in ("publish_dry_run", "publish_local", "publish_push", "publish_pr")
         ),
     }
+
+
+def _trace_metadata(*, run_id: str, request_id: str | None = None) -> dict[str, str]:
+    metadata = {"run_id": run_id}
+    if request_id:
+        metadata["request_id"] = request_id
+    return metadata
 
 
 def _run_response(result: dict[str, Any]) -> RunResponse:

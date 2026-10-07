@@ -75,7 +75,8 @@ def test_run_service_audits_lifecycle_without_raw_issue(monkeypatch) -> None:
     service = RepoPilotRunService(audit_logger=audit)
 
     run = service.create_run(
-        RunRequest(issue="A" * 1000, apply_changes=False, run_tests=False)
+        RunRequest(issue="A" * 1000, apply_changes=False, run_tests=False),
+        request_id="trace-run",
     )
     service.execute_run(run.run_id)
 
@@ -85,10 +86,14 @@ def test_run_service_audits_lifecycle_without_raw_issue(monkeypatch) -> None:
         RUN_COMPLETED,
     ]
     created = audit.events[0]
+    assert created["metadata"]["request_id"] == "trace-run"
+    assert created["metadata"]["run_id"] == run.run_id
     assert created["metadata"]["request"]["mode"] == "issue_text"
     assert "issue" not in created["metadata"]["request"]
     assert "A" * 1000 not in json.dumps(created)
     completed = audit.events[-1]
+    assert completed["metadata"]["request_id"] == "trace-run"
+    assert completed["metadata"]["run_id"] == run.run_id
     assert completed["metadata"]["status"] == "awaiting_approval"
     assert completed["metadata"]["changed_files"] == ["app.py"]
 
@@ -149,6 +154,7 @@ def test_run_service_audits_failures_without_exception_message(monkeypatch) -> N
     failed = audit.events[-1]
     assert failed["event_type"] == RUN_FAILED
     assert failed["metadata"] == {
+        "run_id": run.run_id,
         "error_type": "RuntimeError",
         "error_code": "internal_error",
     }
@@ -165,12 +171,14 @@ class CapturingAuditLogger:
         *,
         run_id: str | None = None,
         actor: str = "system",
+        actor_context: dict[str, object] | None = None,
         metadata: dict[str, object] | None = None,
     ):
         event = {
             "event_type": event_type,
             "run_id": run_id,
             "actor": actor,
+            "actor_context": actor_context or {},
             "metadata": metadata or {},
         }
         self.events.append(event)

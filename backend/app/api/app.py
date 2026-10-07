@@ -119,8 +119,9 @@ def create_app(
     def create_run(
         request: RunRequest,
         background_tasks: BackgroundTasks,
+        http_request: Request,
     ) -> RunStatusResponse:
-        run = run_service.create_run(request)
+        run = run_service.create_run(request, request_id=_request_id(http_request))
         background_tasks.add_task(run_service.execute_run, run.run_id)
         return run
 
