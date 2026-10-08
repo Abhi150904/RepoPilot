@@ -5,6 +5,8 @@ from typing import TypedDict
 
 class AgentState(TypedDict, total=False):
     repository: str
+    _run_id: str
+    _github_token: str
     issue_number: int
     issue: str
     issue_title: str

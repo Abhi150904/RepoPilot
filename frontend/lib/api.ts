@@ -15,6 +15,40 @@ export type HealthResponse = {
   service: "repopilot";
 };
 
+export type ReadinessResponse = {
+  status: "ready" | "degraded";
+  service: "repopilot";
+  environment: string;
+  hosted_mode: boolean;
+  checks: Record<string, boolean>;
+  warnings: string[];
+};
+
+export type AuthUser = {
+  github_user_id: number;
+  login: string;
+  avatar_url?: string | null;
+  name?: string | null;
+};
+
+export type AuthMeResponse = {
+  authenticated: boolean;
+  user?: AuthUser | null;
+  csrf_token?: string | null;
+};
+
+export type GitHubRepository = {
+  full_name: string;
+  installation_id: number;
+  default_branch?: string | null;
+  private?: boolean | null;
+};
+
+export type GitHubRepositoriesResponse = {
+  repositories: GitHubRepository[];
+  install_url?: string | null;
+};
+
 export type RunError = {
   code: string;
   message: string;
@@ -53,6 +87,26 @@ export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_REPOPILOT_API_URL ?? "http://localhost:8000"
 ).replace(/\/$/, "");
 
+let csrfToken: string | null = null;
+
+export function githubLoginUrl(): string {
+  return `${API_BASE_URL}/auth/github/login`;
+}
+
+export async function getAuthMe(): Promise<AuthMeResponse> {
+  const response = await apiFetch<AuthMeResponse>("/auth/me");
+  csrfToken = response.csrf_token ?? null;
+  return response;
+}
+
+export async function logout(): Promise<AuthMeResponse> {
+  const response = await apiFetch<AuthMeResponse>("/auth/logout", {
+    method: "POST"
+  });
+  csrfToken = response.csrf_token ?? null;
+  return response;
+}
+
 export async function createRun(request: RunRequest): Promise<RunStatusResponse> {
   return apiFetch<RunStatusResponse>("/runs", {
     method: "POST",
@@ -62,6 +116,14 @@ export async function createRun(request: RunRequest): Promise<RunStatusResponse>
 
 export async function getHealth(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>("/health");
+}
+
+export async function getReady(): Promise<ReadinessResponse> {
+  return apiFetch<ReadinessResponse>("/ready");
+}
+
+export async function getGitHubRepositories(): Promise<GitHubRepositoriesResponse> {
+  return apiFetch<GitHubRepositoriesResponse>("/github/repositories");
 }
 
 export async function getRun(runId: string): Promise<RunStatusResponse> {
@@ -96,12 +158,14 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response;
   const headers = {
     ...(init.body ? { "Content-Type": "application/json" } : {}),
+    ...(csrfToken && init.method && init.method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
     ...init.headers
   };
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
-      headers
+      headers,
+      credentials: "include"
     });
   } catch (error) {
     throw new RepoPilotApiError({

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from base64 import b64encode
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,17 +65,19 @@ def repository_workspace_paths(
 def clone_repository(
     repo: str,
     settings: Settings | None = None,
+    token: str | None = None,
 ) -> CloneResult:
     config = settings or get_settings()
     paths = repository_workspace_paths(repo, settings=config)
     remote_url = github_remote_url(repo)
+    auth_token = token or config.github_token
 
     if paths.repository_dir.exists():
         if _is_git_repository(paths.repository_dir):
             _validate_existing_remote(
                 repo=repo,
                 path=paths.repository_dir,
-                token=config.github_token,
+                token=auth_token,
             )
             return CloneResult(
                 repo=repo,
@@ -86,8 +89,8 @@ def clone_repository(
             f"Workspace path already exists but is not a git repository: {paths.repository_dir}"
         )
 
-    clone_url = github_remote_url(repo, token=config.github_token)
-    _run_git_clone(clone_url=clone_url, target=paths.repository_dir, token=config.github_token)
+    clone_url = github_remote_url(repo)
+    _run_git_clone(clone_url=clone_url, target=paths.repository_dir, token=auth_token)
     return CloneResult(
         repo=repo,
         path=paths.repository_dir,
@@ -102,8 +105,9 @@ def create_run_worktree(
     branch_name: str,
     base_ref: str = "HEAD",
     settings: Settings | None = None,
+    token: str | None = None,
 ) -> RunWorkspace:
-    clone = clone_repository(repo, settings=settings)
+    clone = clone_repository(repo, settings=settings, token=token)
     paths = repository_workspace_paths(repo, settings=settings)
     safe_branch = safe_branch_name(branch_name)
     worktree_path = _resolve_inside(paths.runs_dir, safe_branch)
@@ -201,7 +205,7 @@ def _is_git_repository(path: Path) -> bool:
 def _run_git_clone(clone_url: str, target: Path, token: str | None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
-        ["git", "clone", clone_url, str(target)],
+        ["git", *_git_auth_args(token), "clone", clone_url, str(target)],
         capture_output=True,
         text=True,
         check=False,
@@ -283,4 +287,17 @@ def _normalize_remote(remote: str) -> str:
 def _redact_token(text: str, token: str | None) -> str:
     if not token:
         return text
-    return text.replace(token, "[redacted]")
+    return text.replace(token, "[redacted]").replace(_git_auth_header(token), "[redacted]")
+
+
+def _git_auth_args(token: str | None) -> list[str]:
+    if not token:
+        return []
+    return [
+        "-c",
+        f"http.https://github.com/.extraheader=AUTHORIZATION: basic {_git_auth_header(token)}",
+    ]
+
+
+def _git_auth_header(token: str) -> str:
+    return b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")

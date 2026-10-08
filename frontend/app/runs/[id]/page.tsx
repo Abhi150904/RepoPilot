@@ -42,7 +42,13 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
             <h1 className="mt-2 font-display text-3xl font-semibold">{view.headline}</h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-secondary)]">{error ?? view.summary}</p>
           </div>
-          <ButtonLink href={`/runs/${params.id}/review`} variant="primary">Review run</ButtonLink>
+          {view.canReview ? (
+            <ButtonLink href={`/runs/${params.id}/review`} variant="primary">Review run</ButtonLink>
+          ) : (
+            <span className="inline-flex min-h-10 items-center rounded-lg border border-[var(--border)] px-3.5 text-sm text-[var(--text-secondary)]">
+              Review unavailable
+            </span>
+          )}
         </header>
         <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)_240px]">
           <RunTimeline view={view} />

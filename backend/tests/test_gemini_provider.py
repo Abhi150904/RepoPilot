@@ -5,7 +5,7 @@ import pytest
 from types import SimpleNamespace
 
 from app.core.config import Settings
-from app.core.llm import GeminiLLMProvider, LLMProviderError, get_llm
+from app.core.llm import GeminiLLMProvider, GroqLLMProvider, LLMProviderError, get_llm
 from app.schemas.code_change import SourceFile
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
@@ -55,6 +55,24 @@ def _gemini_payload_with_usage(text: str) -> dict[str, object]:
     return payload
 
 
+def _groq_payload(text: str) -> dict[str, object]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": text,
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 13,
+            "completion_tokens": 8,
+            "total_tokens": 21,
+        },
+    }
+
+
 def _response(status_code: int, payload: dict[str, object]) -> httpx.Response:
     return httpx.Response(
         status_code,
@@ -70,6 +88,7 @@ def test_get_llm_builds_gemini_provider_from_settings() -> None:
             llm_provider="gemini",
             llm_model="gemini-3.7-flash",
             gemini_api_key="test-key",
+            _env_file=None,
         ),
     )
 
@@ -84,11 +103,27 @@ def test_get_llm_uses_role_specific_model_when_configured() -> None:
             llm_model="gemini-3.7-flash",
             reviewer_model="gemini-3.7-pro",
             gemini_api_key="test-key",
+            _env_file=None,
         ),
     )
 
     assert isinstance(provider, GeminiLLMProvider)
     assert provider._model == "gemini-3.7-pro"
+
+
+def test_get_llm_builds_groq_provider_from_settings() -> None:
+    provider = get_llm(
+        "coder",
+        settings=Settings(
+            llm_provider="groq",
+            llm_model="openai/gpt-oss-120b",
+            groq_api_key="test-key",
+            _env_file=None,
+        ),
+    )
+
+    assert isinstance(provider, GroqLLMProvider)
+    assert provider._model == "openai/gpt-oss-120b"
 
 
 def test_settings_accepts_repo_pilot_env_aliases(monkeypatch) -> None:
@@ -103,6 +138,20 @@ def test_settings_accepts_repo_pilot_env_aliases(monkeypatch) -> None:
     assert settings.llm_provider == "gemini"
     assert settings.llm_model == "gemini-3.7-pro"
     assert settings.gemini_api_key == "test-key"
+
+
+def test_settings_accepts_groq_env_aliases(monkeypatch) -> None:
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("REPOPILOT_GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("REPO_PILOT_LLM_PROVIDER", "groq")
+    monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "openai/gpt-oss-120b")
+    monkeypatch.setenv("REPO_PILOT_GROQ_API_KEY", "test-key")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_provider == "groq"
+    assert settings.llm_model == "openai/gpt-oss-120b"
+    assert settings.groq_api_key == "test-key"
 
 
 def test_settings_accepts_retry_and_cap_env_aliases(monkeypatch) -> None:
@@ -141,6 +190,92 @@ def test_get_llm_requires_gemini_model() -> None:
                 gemini_api_key="test-key",
             ),
         )
+
+
+def test_get_llm_requires_groq_api_key() -> None:
+    with pytest.raises(ValueError, match="GROQ_API_KEY"):
+        get_llm(
+            "coder",
+            settings=SimpleNamespace(
+                llm_provider="groq",
+                llm_model="openai/gpt-oss-120b",
+                groq_api_key=None,
+            ),
+        )
+
+
+def test_groq_provider_analyzes_issue_with_json_mode(monkeypatch) -> None:
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        return _response(
+            200,
+            _groq_payload(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GroqLLMProvider(api_key="test-key", model="openai/gpt-oss-120b")
+
+    analysis = provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert captured["json"]["model"] == "openai/gpt-oss-120b"
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert captured["json"]["max_completion_tokens"] == 8192
+    assert '"role": "analyzer"' in captured["json"]["messages"][1]["content"]
+    assert analysis.risk_level == "medium"
+    assert provider.usage_events[0].provider == "groq"
+    assert provider.usage_events[0].total_tokens == 21
+
+
+def test_groq_provider_retries_malformed_json_with_repair_prompt(monkeypatch) -> None:
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json)
+        if len(calls) == 1:
+            return _response(200, _groq_payload("not json"))
+        return _response(
+            200,
+            _groq_payload(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GroqLLMProvider(
+        api_key="test-key",
+        model="openai/gpt-oss-120b",
+        max_retries=1,
+        sleep=lambda delay: None,
+    )
+
+    analysis = provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    assert analysis.risk_level == "medium"
+    assert len(calls) == 2
+    assert calls[1]["messages"][-1]["role"] == "user"
+    assert "not json" in calls[1]["messages"][-1]["content"]
 
 
 def test_gemini_provider_analyzes_issue_with_structured_output(monkeypatch) -> None:
@@ -326,6 +461,79 @@ def test_gemini_provider_retries_malformed_json_with_repair_prompt(monkeypatch) 
     repair_text = calls[1]["contents"][1]["parts"][0]["text"]
     assert "corrected JSON only" in repair_text
     assert "IssueAnalysis" in repair_text
+    assert "not json" in repair_text
+
+
+def test_gemini_provider_extracts_json_from_wrapped_response(monkeypatch) -> None:
+    def fake_post(url, params, json, timeout):
+        return _response(
+            200,
+            _gemini_payload(
+                """
+                Here is the JSON:
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                Done.
+                """
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        max_retries=0,
+    )
+
+    analysis = provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    assert analysis.risk_level == "medium"
+
+
+def test_gemini_provider_accepts_raw_newlines_inside_json_strings(monkeypatch) -> None:
+    def fake_post(url, params, json, timeout):
+        return _response(
+            200,
+            _gemini_payload(
+                """{
+                  "summary": "Validate email input.",
+                  "changes": [
+                    {
+                      "path": "src/routes/login.py",
+                      "action": "modify",
+                      "explanation": "Add validation.",
+                      "proposed_content": "def login(payload):
+    email = payload.get('email')
+    if not email:
+        return {'error': 'email is required'}, 400
+    return {'email': email}
+"
+                    }
+                  ]
+                }"""
+            ),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        max_retries=0,
+    )
+
+    change_set = provider.propose_code_changes(
+        issue="Login endpoint returns 500 when email is missing",
+        analysis=_analysis(),
+        plan=_plan(),
+        target_files=[SourceFile(path="src/routes/login.py", content="def login(payload): pass")],
+    )
+
+    assert change_set.changes[0].path == "src/routes/login.py"
+    assert "email is required" in change_set.changes[0].proposed_content
 
 
 def test_gemini_provider_records_usage_metadata(monkeypatch) -> None:

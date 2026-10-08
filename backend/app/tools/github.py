@@ -16,8 +16,9 @@ class GitHubError(RuntimeError):
 
 
 class GitHubClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, token: str | None = None) -> None:
         self._settings = settings or get_settings()
+        self._token = token
         self._base_url = "https://api.github.com"
 
     def get_issue(self, repo: str, issue_number: int) -> GitHubIssue:
@@ -86,8 +87,9 @@ class GitHubClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if self._settings.github_token:
-            headers["Authorization"] = f"Bearer {self._settings.github_token}"
+        token = self._token or self._settings.github_token
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
 
         url = f"{self._base_url}{path}"
         json_body = params.pop("json", None)

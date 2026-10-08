@@ -79,7 +79,7 @@ def test_clone_repository_clones_into_workspace(monkeypatch, tmp_path) -> None:
     def fake_run(args, cwd=None, capture_output=True, text=True, check=False):
         calls.append({"args": args, "cwd": cwd})
         target = args[-1]
-        if args[:2] == ["git", "clone"]:
+        if args[0] == "git" and "clone" in args:
             (tmp_path / "workspaces" / "Abhi150904__Wandr" / ".git").mkdir(parents=True)
             assert target.endswith("Abhi150904__Wandr")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -92,7 +92,9 @@ def test_clone_repository_clones_into_workspace(monkeypatch, tmp_path) -> None:
     assert result.cloned is True
     assert result.path == tmp_path / "workspaces" / "Abhi150904__Wandr"
     assert result.remote_url == "https://github.com/Abhi150904/Wandr.git"
-    assert calls[0]["args"][2] == "https://x-access-token:secret-token@github.com/Abhi150904/Wandr.git"
+    assert calls[0]["args"][-2] == "https://github.com/Abhi150904/Wandr.git"
+    assert "secret-token" not in " ".join(calls[0]["args"])
+    assert "extraheader=AUTHORIZATION: basic" in calls[0]["args"][2]
 
 
 def test_clone_repository_reuses_existing_git_repo(monkeypatch, tmp_path) -> None:

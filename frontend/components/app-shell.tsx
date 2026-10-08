@@ -8,6 +8,7 @@ import * as Tooltip from "@radix-ui/react-tooltip";
 import {
   Braces,
   Command,
+  Github,
   GitBranch,
   Home,
   ListChecks,
@@ -19,6 +20,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { RepoPilotLogo } from "@/components/repopilot-logo";
+import { getAuthMe, getReady, githubLoginUrl, logout, type AuthMeResponse } from "@/lib/api";
 
 const navItems = [
   { href: "/app", label: "Command Center", icon: Home },
@@ -31,6 +33,8 @@ const navItems = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [auth, setAuth] = useState<AuthMeResponse | null>(null);
+  const [hostedMode, setHostedMode] = useState(false);
 
   useEffect(() => {
     setCollapsed(window.localStorage.getItem("repopilot.sidebar") === "collapsed");
@@ -49,6 +53,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadSession() {
+      try {
+        const [ready, me] = await Promise.all([getReady(), getAuthMe()]);
+        if (!cancelled) {
+          setHostedMode(ready.hosted_mode);
+          setAuth(me);
+        }
+      } catch {
+        if (!cancelled) {
+          setAuth({ authenticated: false });
+        }
+      }
+    }
+    loadSession();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -95,19 +120,68 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className={cn("transition-[padding] duration-200", collapsed ? "pl-[72px]" : "pl-[232px]")}>
         <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-[var(--border)] bg-[var(--background)]/90 px-6 backdrop-blur">
           <div aria-hidden="true" />
-          <button
-            className="hidden min-h-10 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] md:flex"
-            onClick={() => setPaletteOpen(true)}
-          >
-            <Search size={16} />
-            Search actions
-            <kbd className="rounded border border-[var(--border)] px-1.5 py-0.5 font-display text-[10px]">Ctrl K</kbd>
-          </button>
+          <div className="flex items-center gap-3">
+            <AuthControl auth={auth} hostedMode={hostedMode} onAuthChange={setAuth} />
+            <button
+              className="hidden min-h-10 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] md:flex"
+              onClick={() => setPaletteOpen(true)}
+            >
+              <Search size={16} />
+              Search actions
+              <kbd className="rounded border border-[var(--border)] px-1.5 py-0.5 font-display text-[10px]">Ctrl K</kbd>
+            </button>
+          </div>
         </header>
         <main className="px-6 py-6">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
+  );
+}
+
+function AuthControl({
+  auth,
+  hostedMode,
+  onAuthChange
+}: {
+  auth: AuthMeResponse | null;
+  hostedMode: boolean;
+  onAuthChange: (auth: AuthMeResponse) => void;
+}) {
+  if (!hostedMode) {
+    return (
+      <span className="hidden rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--text-secondary)] md:inline-flex">
+        Local mode
+      </span>
+    );
+  }
+
+  if (auth?.authenticated && auth.user) {
+    return (
+      <button
+        className="flex min-h-10 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+        onClick={async () => onAuthChange(await logout())}
+        title="Sign out"
+      >
+        {auth.user.avatar_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img alt="" className="h-5 w-5 rounded-full" src={auth.user.avatar_url} />
+        ) : (
+          <Github size={16} />
+        )}
+        <span className="hidden md:inline">{auth.user.login}</span>
+      </button>
+    );
+  }
+
+  return (
+    <a
+      className="flex min-h-10 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text-primary)] hover:bg-[var(--surface-elevated)]"
+      href={githubLoginUrl()}
+    >
+      <Github size={16} />
+      Sign in
+    </a>
   );
 }
 

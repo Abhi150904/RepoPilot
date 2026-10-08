@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 from app.schemas.execution import TestResult
@@ -67,10 +69,17 @@ def run_tests_locally(
 ) -> TestResult:
     workspace = _resolve_workspace(workspace_path)
     _validate_command(command)
+    setup_result = _prepare_local_dependencies(
+        workspace=workspace,
+        timeout_seconds=timeout_seconds,
+        output_limit=output_limit,
+    )
+    if setup_result is not None:
+        return setup_result
 
     try:
         completed = subprocess.run(
-            command,
+            _resolve_command(command),
             cwd=workspace,
             capture_output=True,
             text=True,
@@ -95,6 +104,8 @@ def run_tests_locally(
             timed_out=True,
             command=command,
         )
+    except FileNotFoundError:
+        return _command_not_found_result(command)
 
 
 def build_docker_command(
@@ -169,3 +180,74 @@ def _count_pytest_results(stdout: str) -> dict[str, int]:
         failed = int(failed_match.group(1))
 
     return {"passed": passed, "failed": failed}
+
+
+def _prepare_local_dependencies(
+    *,
+    workspace: Path,
+    timeout_seconds: int,
+    output_limit: int,
+) -> TestResult | None:
+    if not (workspace / "package.json").exists() or (workspace / "node_modules").exists():
+        return None
+
+    command = ["npm", "ci"] if (workspace / "package-lock.json").exists() else ["npm", "install"]
+    try:
+        completed = subprocess.run(
+            _resolve_command(command),
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return TestResult(
+            exit_code=124,
+            stdout=_truncate_output(_coerce_output(exc.stdout), output_limit),
+            stderr=_truncate_output(_coerce_output(exc.stderr), output_limit),
+            timed_out=True,
+            command=command,
+        )
+    except FileNotFoundError:
+        return _command_not_found_result(command)
+
+    if completed.returncode == 0:
+        return None
+
+    return TestResult(
+        exit_code=completed.returncode,
+        stdout=_truncate_output(completed.stdout, output_limit),
+        stderr=_truncate_output(completed.stderr, output_limit),
+        timed_out=False,
+        command=command,
+    )
+
+
+def _resolve_command(command: list[str]) -> list[str]:
+    executable = command[0]
+    resolved = shutil.which(executable)
+    if resolved:
+        return [resolved, *command[1:]]
+    if os.name == "nt" and not executable.lower().endswith((".exe", ".cmd", ".bat")):
+        for candidate in (f"{executable}.cmd", f"{executable}.exe", f"{executable}.bat"):
+            resolved_candidate = shutil.which(candidate)
+            if resolved_candidate:
+                return [resolved_candidate, *command[1:]]
+        npm_cmd = Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "nodejs" / f"{executable}.cmd"
+        if executable.lower() == "npm" and npm_cmd.exists():
+            return [str(npm_cmd), *command[1:]]
+    return command
+
+
+def _command_not_found_result(command: list[str]) -> TestResult:
+    return TestResult(
+        exit_code=127,
+        stdout="",
+        stderr=(
+            f"Command not found: {command[0]}. "
+            "Install it or add it to the PATH used by the RepoPilot backend process."
+        ),
+        timed_out=False,
+        command=command,
+    )

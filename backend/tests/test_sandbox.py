@@ -8,9 +8,11 @@ import pytest
 from app.tools.sandbox import (
     SandboxError,
     _count_pytest_results,
+    _resolve_command,
     _truncate_output,
     build_docker_command,
     run_tests_in_docker,
+    run_tests_locally,
 )
 
 
@@ -95,3 +97,75 @@ def test_run_tests_in_docker_converts_timeout(monkeypatch) -> None:
     assert result.timed_out is True
     assert "partial stdout" in result.stdout
     assert "partial stderr" in result.stderr
+
+
+def test_run_tests_locally_installs_node_dependencies_when_missing(tmp_path, monkeypatch) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[1:] == ["ci"]:
+            (tmp_path / "node_modules").mkdir()
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="===== 1 passed in 0.10s =====",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_tests_locally(workspace_path=tmp_path, command=["npm", "test"])
+
+    assert [call[1:] for call in calls] == [["ci"], ["test"]]
+    assert all(Path(call[0]).name.lower().startswith("npm") for call in calls)
+    assert result.exit_code == 0
+    assert result.passed == 1
+
+
+def test_run_tests_locally_returns_install_failure(tmp_path, monkeypatch) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=1,
+            stdout="",
+            stderr="npm install failed",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_tests_locally(workspace_path=tmp_path, command=["npm", "test"])
+
+    assert result.exit_code == 1
+    assert result.command == ["npm", "install"]
+    assert "npm install failed" in result.stderr
+
+
+def test_run_tests_locally_returns_command_not_found(tmp_path, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_tests_locally(workspace_path=tmp_path, command=["missing-tool", "test"])
+
+    assert result.exit_code == 127
+    assert result.command == ["missing-tool", "test"]
+    assert "Command not found: missing-tool" in result.stderr
+
+
+def test_resolve_command_uses_windows_command_shim(monkeypatch) -> None:
+    def fake_which(executable):
+        if executable == "npm.cmd":
+            return "C:\\Program Files\\nodejs\\npm.cmd"
+        return None
+
+    monkeypatch.setattr("app.tools.sandbox.os.name", "nt")
+    monkeypatch.setattr("app.tools.sandbox.shutil.which", fake_which)
+
+    assert _resolve_command(["npm", "test"]) == ["C:\\Program Files\\nodejs\\npm.cmd", "test"]
