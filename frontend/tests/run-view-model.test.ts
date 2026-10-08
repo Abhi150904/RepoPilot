@@ -63,4 +63,122 @@ describe("buildRunView", () => {
     expect(view.verification.every((item) => item.verified)).toBe(true);
     expect(view.publish.prUrl).toBe("https://github.com/example/demo/pull/1");
   });
+
+  it("does not show ready copy or fake artifacts for provider failures", () => {
+    const run: RunStatusResponse = {
+      run_id: "run-2",
+      lifecycle_status: "completed",
+      request: { repository: "example/demo", issue_number: 8 },
+      error: null,
+      response: {
+        status: "needs_human",
+        next_action: "inspect_failure",
+        summary: "LLM provider failed before the workflow could continue.",
+        run_summary: {
+          status: "needs_human",
+          summary: "LLM provider failed before the workflow could continue.",
+          next_action: "inspect_failure",
+          tests_passed: false,
+          repair_attempts: 0,
+          metrics: null
+        },
+        result: {
+          repository: "example/demo",
+          issue_number: 8,
+          issue: "Fix submit validation",
+          llm_error: {
+            stage: "reviewer",
+            message: "Gemini request failed with 503 Service Unavailable."
+          },
+          run_summary: {
+            status: "needs_human",
+            summary: "LLM provider failed before the workflow could continue.",
+            next_action: "inspect_failure"
+          }
+        }
+      }
+    };
+
+    const view = buildRunView(run);
+
+    expect(view.headline).toBe("RepoPilot needs your attention.");
+    expect(view.canReview).toBe(false);
+    expect(view.diffFile).toBe("No changed files");
+    expect(view.diffStats).toBe("+0 -0");
+    expect(view.diffLines[0].text).toBe("No diff was generated for this run.");
+    expect(view.review.confidence).toBe("n/a");
+    expect(view.publish.status).toBe("Locked");
+  });
+
+  it("does not show success copy for failed runs without artifacts", () => {
+    const run: RunStatusResponse = {
+      run_id: "run-3",
+      lifecycle_status: "failed",
+      request: { repository: "example/demo", issue_number: 9 },
+      response: null,
+      error: {
+        code: "provider_error",
+        message: "Model provider operation failed. Check provider configuration.",
+        type: "LLMProviderError"
+      }
+    };
+
+    const view = buildRunView(run);
+
+    expect(view.headline).toBe("Run failed before completion.");
+    expect(view.summary).toBe("Model provider operation failed. Check provider configuration.");
+    expect(view.planSteps).toEqual(["No implementation plan was produced for this run."]);
+    expect(view.diffFile).toBe("No changed files");
+    expect(view.tests.summary).toBe("Test output will appear after a run executes.");
+    expect(view.review.risk).toBe("n/a");
+    expect(view.tokens).toBe("n/a");
+    expect(view.canReview).toBe(false);
+  });
+
+  it("does not expose a pull request link for dry run publication results", () => {
+    const run: RunStatusResponse = {
+      run_id: "run-4",
+      lifecycle_status: "completed",
+      request: { repository: "example/demo", issue_number: 10 },
+      error: null,
+      response: {
+        status: "approved",
+        next_action: "human_review",
+        summary: "Approved.",
+        run_summary: {
+          status: "approved",
+          summary: "Approved.",
+          next_action: "human_review",
+          tests_passed: true,
+          repair_attempts: 0
+        },
+        result: {
+          repository: "example/demo",
+          issue_number: 10,
+          issue: "Fix destination validation",
+          modified_files: ["src/app.ts"],
+          review_result: { status: "approved" },
+          approval_decision: { approved: true },
+          approval_binding: { status: "bound", head_commit: "abc123", git_safety: { status: "safe" } },
+          publication_package: {
+            branch_name: "repopilot/issue-10",
+            pr_title: "Fix #10: destination validation"
+          },
+          publish_result: {
+            mode: "dry_run",
+            status: "ready",
+            summary: "Publication dry run passed.",
+            branch_name: "repopilot/issue-10",
+            pr_url: "https://github.com/example/demo/pull/new/repopilot/issue-10"
+          }
+        }
+      }
+    };
+
+    const view = buildRunView(run);
+
+    expect(view.publish.mode).toBe("dry_run");
+    expect(view.publish.status).toBe("ready");
+    expect(view.publish.prUrl).toBeUndefined();
+  });
 });

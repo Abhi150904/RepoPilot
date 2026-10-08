@@ -77,9 +77,73 @@ class Settings(BaseSettings):
             "REPOPILOT_GEMINI_API_KEY",
         ),
     )
+    groq_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GROQ_API_KEY",
+            "REPO_PILOT_GROQ_API_KEY",
+            "REPOPILOT_GROQ_API_KEY",
+        ),
+    )
     github_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("GITHUB_TOKEN", "REPOPILOT_GITHUB_TOKEN"),
+    )
+    github_client_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_CLIENT_ID",
+            "REPO_PILOT_GITHUB_CLIENT_ID",
+            "REPOPILOT_GITHUB_CLIENT_ID",
+        ),
+    )
+    github_client_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_CLIENT_SECRET",
+            "REPO_PILOT_GITHUB_CLIENT_SECRET",
+            "REPOPILOT_GITHUB_CLIENT_SECRET",
+        ),
+    )
+    github_oauth_callback_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_OAUTH_CALLBACK_URL",
+            "REPO_PILOT_GITHUB_OAUTH_CALLBACK_URL",
+            "REPOPILOT_GITHUB_OAUTH_CALLBACK_URL",
+        ),
+    )
+    github_app_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_APP_ID",
+            "REPO_PILOT_GITHUB_APP_ID",
+            "REPOPILOT_GITHUB_APP_ID",
+        ),
+    )
+    github_app_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_APP_NAME",
+            "REPO_PILOT_GITHUB_APP_NAME",
+            "REPOPILOT_GITHUB_APP_NAME",
+        ),
+    )
+    github_app_private_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_APP_PRIVATE_KEY",
+            "REPO_PILOT_GITHUB_APP_PRIVATE_KEY",
+            "REPOPILOT_GITHUB_APP_PRIVATE_KEY",
+        ),
+    )
+    github_webhook_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GITHUB_WEBHOOK_SECRET",
+            "REPO_PILOT_GITHUB_WEBHOOK_SECRET",
+            "REPOPILOT_GITHUB_WEBHOOK_SECRET",
+        ),
     )
     workspace_root: str = Field(
         default=".repopilot/workspaces",
@@ -149,6 +213,10 @@ def deployment_warnings(settings: Settings) -> list[str]:
         warnings.append("Hosted mode should use GitHub App/OAuth instead of a personal GitHub token.")
     if settings.hosted_mode and not settings.public_base_url:
         warnings.append("Hosted mode should set REPO_PILOT_PUBLIC_BASE_URL.")
+    if settings.hosted_mode and not (settings.github_client_id and settings.github_client_secret):
+        warnings.append("Hosted mode should configure GitHub OAuth client credentials.")
+    if settings.hosted_mode and not (settings.github_app_id and settings.github_app_private_key):
+        warnings.append("Hosted mode should configure GitHub App credentials.")
     if "*" in _cors_origins(settings.cors_origins):
         warnings.append("Wildcard CORS origins are not recommended outside local development.")
     return warnings
@@ -160,6 +228,10 @@ def deployment_issues(settings: Settings) -> list[str]:
         issues.append("REPO_PILOT_HOSTED_MODE=true cannot be used with a personal GitHub token.")
     if settings.hosted_mode and "*" in _cors_origins(settings.cors_origins):
         issues.append("REPO_PILOT_CORS_ORIGINS cannot include * in hosted mode.")
+    if settings.hosted_mode and not (settings.github_client_id and settings.github_client_secret):
+        issues.append("GitHub OAuth client credentials are required in hosted mode.")
+    if settings.hosted_mode and not (settings.github_app_id and settings.github_app_private_key):
+        issues.append("GitHub App credentials are required in hosted mode.")
     return issues
 
 

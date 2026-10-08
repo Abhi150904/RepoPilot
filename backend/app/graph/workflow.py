@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
@@ -132,7 +133,7 @@ def after_publish_push_route(state: AgentState) -> str:
 def fetch_github_issue_node(state: AgentState) -> AgentState:
     repository = state["repository"]
     issue_number = state["issue_number"]
-    issue = GitHubClient().get_issue(repository, issue_number)
+    issue = _github_client(state).get_issue(repository, issue_number)
     issue_text = f"{issue.title}\n\n{issue.body}".strip()
     return {
         "issue": issue_text,
@@ -224,7 +225,7 @@ def repo_explorer_node(state: AgentState) -> AgentState:
     repository = state["repository"]
     issue = state["issue"]
     analysis = IssueAnalysis.model_validate(state["analysis"])
-    explorer = RepoExplorer(github=GitHubClient())
+    explorer = RepoExplorer(github=_github_client(state))
     context = explorer.explore(
         repository=repository,
         issue=issue,
@@ -253,7 +254,7 @@ def load_target_files_node(state: AgentState) -> AgentState:
                     SourceFile(path=path, content=filesystem.read_text(path), exists=True)
                 )
     elif "repository" in state:
-        github = GitHubClient()
+        github = _github_client(state)
         for path in target_paths:
             try:
                 content = github.read_file(state["repository"], path)
@@ -270,9 +271,11 @@ def prepare_repository_workspace_node(state: AgentState) -> AgentState:
     if not _needs_local_workspace(state):
         return {}
 
+    token = _github_token(state)
     worktree = create_run_worktree(
         repo=state["repository"],
         branch_name=_workspace_branch_name(state),
+        **({"token": token} if token else {}),
     )
     return {
         "workspace_path": str(worktree.path),
@@ -363,8 +366,8 @@ def run_tests_node(state: AgentState) -> AgentState:
     if not workspace_path:
         raise ValueError("workspace_path is required when run_tests is true.")
 
-    command = state.get("test_command", ["python", "-m", "pytest", "-p", "no:cacheprovider"])
-    runner = state.get("test_runner", "docker")
+    command = _test_command_for_workspace(workspace_path, state.get("test_command"))
+    runner = _test_runner_for_workspace(workspace_path, state.get("test_runner", "docker"), command)
     if runner == "local":
         result = run_tests_locally(workspace_path=workspace_path, command=command)
     else:
@@ -373,6 +376,29 @@ def run_tests_node(state: AgentState) -> AgentState:
             command=command,
         )
     return {"test_result": result.model_dump()}
+
+
+def _test_command_for_workspace(
+    workspace_path: str,
+    requested_command: list[str] | None,
+) -> list[str]:
+    if requested_command:
+        return requested_command
+    workspace = Path(workspace_path)
+    if (workspace / "package.json").exists():
+        return ["npm", "test"]
+    return ["python", "-m", "pytest", "-p", "no:cacheprovider"]
+
+
+def _test_runner_for_workspace(
+    workspace_path: str,
+    requested_runner: str,
+    command: list[str],
+) -> str:
+    workspace = Path(workspace_path)
+    if requested_runner == "docker" and (workspace / "package.json").exists() and command[:2] == ["npm", "test"]:
+        return "local"
+    return requested_runner
 
 
 def analyze_tests_node(state: AgentState) -> AgentState:
@@ -494,14 +520,14 @@ def publish_dry_run_node(state: AgentState) -> AgentState:
 
 def publish_local_node(state: AgentState) -> AgentState:
     package = PublicationPackage.model_validate(state["publication_package"])
-    result = PublishExecutor(workspace_path=state.get("workspace_path")).publish_local(package)
+    result = _publish_executor(state).publish_local(package)
     return {"publish_result": result.model_dump()}
 
 
 def publish_push_node(state: AgentState) -> AgentState:
     package = PublicationPackage.model_validate(state["publication_package"])
     local_result = PublishResult.model_validate(state["publish_result"])
-    result = PublishExecutor(workspace_path=state.get("workspace_path")).push_branch(
+    result = _publish_executor(state).push_branch(
         package=package,
         local_result=local_result,
     )
@@ -511,11 +537,11 @@ def publish_push_node(state: AgentState) -> AgentState:
 def publish_pr_node(state: AgentState) -> AgentState:
     package = PublicationPackage.model_validate(state["publication_package"])
     push_result = PublishResult.model_validate(state["publish_result"])
-    result = PublishExecutor(workspace_path=state.get("workspace_path")).open_pull_request(
+    result = _publish_executor(state).open_pull_request(
         package=package,
         push_result=push_result,
         repository=state.get("repository"),
-        github=GitHubClient(),
+        github=_github_client(state),
     )
     return {"publish_result": result.model_dump()}
 
@@ -537,6 +563,26 @@ def _provider_error(stage: str, exc: Exception) -> dict[str, object]:
         "message": str(exc),
         "next_action": "inspect_failure",
     }
+
+
+def _github_client(state: AgentState) -> GitHubClient:
+    token = _github_token(state)
+    return GitHubClient(token=token) if token else GitHubClient()
+
+
+def _github_token(state: AgentState) -> str | None:
+    token = state.get("_github_token")
+    return token if isinstance(token, str) and token else None
+
+
+def _publish_executor(state: AgentState) -> PublishExecutor:
+    token = _github_token(state)
+    if token:
+        return PublishExecutor(
+            workspace_path=state.get("workspace_path"),
+            github_token=token,
+        )
+    return PublishExecutor(workspace_path=state.get("workspace_path"))
 
 
 def _node_success_update(
@@ -704,10 +750,19 @@ def _workspace_branch_name(state: AgentState) -> str:
     issue_number = state.get("issue_number")
     issue_title = state.get("issue_title") or state.get("issue", "repopilot changes")
     slug = re.sub(r"[^a-z0-9]+", "-", str(issue_title).lower()).strip("-")
-    slug = re.sub(r"-+", "-", slug)[:50].strip("-") or "changes"
+    run_suffix = _run_branch_suffix(state)
+    max_slug_length = 50 - len(run_suffix) - 1 if run_suffix else 50
+    slug = re.sub(r"-+", "-", slug)[:max_slug_length].strip("-") or "changes"
+    if run_suffix:
+        slug = f"{slug}-{run_suffix}"
     if issue_number is not None:
         return f"repopilot/issue-{issue_number}-{slug}"
     return f"repopilot/{slug}"
+
+
+def _run_branch_suffix(state: AgentState) -> str:
+    run_id = state.get("_run_id")
+    return run_id[:8] if isinstance(run_id, str) and run_id else ""
 
 
 def build_workflow():

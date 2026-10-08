@@ -8,6 +8,8 @@ import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.core.config import Settings
+
 
 def _minimal_result() -> dict[str, object]:
     return {
@@ -82,7 +84,9 @@ def test_cli_run_subcommand_builds_github_apply_state(monkeypatch, capsys) -> No
         "issue_number": 16,
         "apply_changes": True,
         "max_repair_attempts": 1,
+        "_run_id": captured["state"]["_run_id"],
     }
+    assert captured["state"]["_run_id"]
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "RepoPilot run complete" in output
@@ -125,7 +129,9 @@ def test_cli_legacy_root_flags_still_work(monkeypatch) -> None:
         "test_runner": "docker",
         "max_repair_attempts": 1,
         "test_command": ["python", "-m", "pytest"],
+        "_run_id": captured["state"]["_run_id"],
     }
+    assert captured["state"]["_run_id"]
 
 
 def test_cli_local_apply_requires_workspace() -> None:
@@ -380,6 +386,9 @@ def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
     monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "gemini-test-model")
     monkeypatch.setenv("GEMINI_API_KEY", "secret")
     monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.delenv("REPO_PILOT_HOSTED_MODE", raising=False)
+    monkeypatch.delenv("REPOPILOT_HOSTED_MODE", raising=False)
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(_env_file=None))
     monkeypatch.setattr(cli.shutil, "which", lambda command: "C:/tools/repopilot.exe")
 
     exit_code = cli.main(["config", "validate"])
@@ -404,6 +413,9 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
     monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "gemini-test-model")
     monkeypatch.setenv("GEMINI_API_KEY", "secret")
     monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.delenv("REPO_PILOT_HOSTED_MODE", raising=False)
+    monkeypatch.delenv("REPOPILOT_HOSTED_MODE", raising=False)
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(_env_file=None))
     monkeypatch.setattr(cli.shutil, "which", lambda command: None)
 
     exit_code = cli.main(["config", "validate", "--json"])

@@ -15,10 +15,11 @@ def apply_change_set(
     change_set: CodeChangeSet,
     filesystem: WorkspaceFileSystem,
 ) -> ChangeApplicationResult:
-    originals = _read_originals(change_set.changes, filesystem)
+    changes = [_normalize_action(change=change, filesystem=filesystem) for change in change_set.changes]
+    originals = _read_originals(changes, filesystem)
     modified_files: list[str] = []
 
-    for change in change_set.changes:
+    for change in changes:
         if change.proposed_content is None:
             continue
 
@@ -26,7 +27,7 @@ def apply_change_set(
         filesystem.write_text(change.path, change.proposed_content)
         modified_files.append(change.path)
 
-    diff = render_change_set_diff(changes=change_set.changes, originals=originals)
+    diff = render_change_set_diff(changes=changes, originals=originals)
     return ChangeApplicationResult(
         modified_files=modified_files,
         diff=diff,
@@ -56,6 +57,13 @@ def _validate_action(change: FileChange, filesystem: WorkspaceFileSystem) -> Non
         raise PatchApplicationError(f"Cannot modify missing file: {change.path}")
     if change.action == "create" and exists:
         raise PatchApplicationError(f"Cannot create existing file: {change.path}")
+
+
+def _normalize_action(change: FileChange, filesystem: WorkspaceFileSystem) -> FileChange:
+    _validate_safe_path(change.path)
+    if change.action == "create" and filesystem.file_exists(change.path):
+        return change.model_copy(update={"action": "modify"})
+    return change
 
 
 def _validate_safe_path(path: str) -> None:

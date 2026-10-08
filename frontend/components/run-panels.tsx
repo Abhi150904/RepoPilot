@@ -114,6 +114,7 @@ export function ReviewPanel({
   run,
   view,
   isBusy,
+  activeAction,
   onApprove,
   onReject,
   onPublish
@@ -121,6 +122,7 @@ export function ReviewPanel({
   run: RunStatusResponse | null;
   view: RunViewModel;
   isBusy: boolean;
+  activeAction: string | null;
   onApprove: () => void;
   onReject: () => void;
   onPublish: (mode: PublishMode) => void;
@@ -163,17 +165,65 @@ export function ReviewPanel({
         {approved ? (
           <div className="mt-6 border-t border-[var(--border)] pt-5">
             <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Publication options</p>
+            <PublicationStatus view={view} activeAction={activeAction} />
             <div className="mt-3 grid gap-2">
               {publishModes.map((option) => (
-                <Button key={option.title} variant="secondary" onClick={() => onPublish(modeForTitle(option.title))}>
+                <Button
+                  key={option.title}
+                  variant="secondary"
+                  disabled={isBusy}
+                  onClick={() => onPublish(modeForTitle(option.title))}
+                >
                   <GitPullRequestArrow size={16} />
-                  {option.title}
+                  {activeAction === modeForTitle(option.title) ? "Working..." : option.title}
                 </Button>
               ))}
             </div>
           </div>
         ) : null}
       </aside>
+    </div>
+  );
+}
+
+function PublicationStatus({
+  view,
+  activeAction
+}: {
+  view: RunViewModel;
+  activeAction: string | null;
+}) {
+  const isPublishing = activeAction && ["dry_run", "local", "push", "pr"].includes(activeAction);
+  if (isPublishing) {
+    return (
+      <p className="mt-3 rounded-lg border border-cyan-300/30 bg-cyan-300/10 p-3 text-sm text-cyan-100">
+        Publishing action is running. Keep this page open.
+      </p>
+    );
+  }
+  if (!view.publish.status || view.publish.status === "Locked") {
+    return null;
+  }
+  const nextStep =
+    view.publish.mode === "dry_run" && view.publish.status === "ready"
+      ? "Dry run passed. Click Pull Request to commit, push, and open the PR."
+      : null;
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[var(--text-secondary)]">Status</span>
+        <strong>{view.publish.status}</strong>
+      </div>
+      <p className="mt-2 text-[var(--text-secondary)]">{view.publish.summary}</p>
+      {nextStep ? <p className="mt-2 text-cyan-200">{nextStep}</p> : null}
+      {view.publish.branch && view.publish.branch !== "Not prepared" ? (
+        <p className="mt-2 break-all text-xs text-[var(--text-secondary)]">Branch: {view.publish.branch}</p>
+      ) : null}
+      {view.publish.prUrl ? (
+        <a className="mt-3 inline-flex text-sm font-medium text-cyan-300 hover:text-cyan-200" href={view.publish.prUrl} target="_blank" rel="noreferrer">
+          Open pull request
+        </a>
+      ) : null}
     </div>
   );
 }

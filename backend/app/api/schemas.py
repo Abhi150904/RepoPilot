@@ -20,6 +20,37 @@ class ReadinessResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AuthUser(BaseModel):
+    github_user_id: int
+    login: str
+    avatar_url: str | None = None
+    name: str | None = None
+
+
+class AuthMeResponse(BaseModel):
+    authenticated: bool
+    user: AuthUser | None = None
+    csrf_token: str | None = None
+
+
+class GitHubInstallationResponse(BaseModel):
+    id: int
+    account_login: str | None = None
+    account_type: str | None = None
+
+
+class GitHubRepositoryResponse(BaseModel):
+    full_name: str
+    installation_id: int
+    default_branch: str | None = None
+    private: bool | None = None
+
+
+class GitHubRepositoriesResponse(BaseModel):
+    repositories: list[GitHubRepositoryResponse]
+    install_url: str | None = None
+
+
 class RunRequest(BaseModel):
     issue: str | None = None
     repository: str | None = None

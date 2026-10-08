@@ -27,6 +27,7 @@ export type RunViewModel = {
   status: string;
   summary: string;
   nextAction: string;
+  canReview: boolean;
   timeline: Array<{
     label: string;
     icon: typeof Radar;
@@ -57,6 +58,7 @@ export type RunViewModel = {
     verified: boolean;
   }>;
   publish: {
+    mode: string;
     branch: string;
     repository: string;
     title: string;
@@ -84,6 +86,8 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
   const approvalBinding = dict(result.approval_binding);
   const publishResult = dict(result.publish_result);
   const publicationPackage = dict(result.publication_package);
+  const llmError = dict(result.llm_error);
+  const hasRun = Boolean(run);
 
   const changedFiles = stringList(result.modified_files);
   const runWorkspace = dict(result.run_workspace);
@@ -103,21 +107,35 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
   const approvalApproved = booleanValue(approval?.approved);
   const publishStatus = stringValue(publishResult?.status);
   const lifecycleStatus = run?.lifecycle_status;
+  const hasResponse = Boolean(run?.response);
+  const changedFileDetail = changedFiles.length === 1
+    ? "1 file changed"
+    : changedFiles.length > 1
+      ? `${changedFiles.length} files changed`
+      : "No files changed";
 
   return {
     repository,
     issue,
     issueUrl: stringValue(result.issue_url),
-    headline: headlineFor({ lifecycleStatus, summaryStatus: stringValue(summary.status), approvalApproved, publishStatus }),
+    headline: headlineFor({
+      lifecycleStatus,
+      summaryStatus: stringValue(summary.status),
+      approvalApproved,
+      publishStatus,
+      hasLlmError: Boolean(llmError),
+      hasResponse
+    }),
     status: stringValue(summary.status) ?? lifecycleStatus ?? "preview",
-    summary: stringValue(summary.summary) ?? run?.response?.summary ?? "RepoPilot is ready to inspect the next run.",
+    summary: stringValue(summary.summary) ?? run?.response?.summary ?? failureSummary(run) ?? "RepoPilot is ready to inspect the next run.",
     nextAction: stringValue(summary.next_action) ?? "start_run",
+    canReview: Boolean(review || approval || approvalBinding),
     timeline: [
       stage("Issue analysis", Radar, result.analysis, "Intent and risk extracted", lifecycleStatus),
       stage("Repository retrieval", Braces, result.repository_context, "Hybrid retrieval ranked targets", lifecycleStatus),
       stage("Implementation plan", Play, result.plan, `${stepsFromPlan(plan).length} planned steps`, lifecycleStatus),
-      stage("Code generation", Code2, changedFiles.length ? result.code_changes ?? changedFiles : undefined, `${changedFiles.length || 2} files changed`, lifecycleStatus),
-      stage("Tests", TestTube2, result.test_analysis ?? result.test_result, testsPassed === false ? "Tests need attention" : "Tests passed", lifecycleStatus),
+      stage("Code generation", Code2, changedFiles.length ? result.code_changes ?? changedFiles : undefined, changedFileDetail, lifecycleStatus),
+      stage("Tests", TestTube2, result.test_analysis ?? result.test_result, testDetail(testsPassed), lifecycleStatus),
       {
         label: "Repair",
         icon: TimerReset,
@@ -129,7 +147,7 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
         label: "Human approval",
         icon: UserCheck,
         state: approvalApproved ? "complete" : lifecycleStatus === "completed" ? "active" : "locked",
-        detail: approvalApproved ? "Approval bound" : lifecycleStatus === "completed" ? "Waiting for decision" : "Pending completed run"
+        detail: approvalApproved ? "Approval bound" : lifecycleStatus === "completed" && review ? "Waiting for decision" : "Pending completed run"
       },
       {
         label: "Publication",
@@ -138,9 +156,9 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
         detail: stringValue(publishResult?.summary) ?? "Locked until approval"
       }
     ],
-    planSteps: stepsFromPlan(plan),
-    diffLines: diffFromText(stringValue(result.diff)),
-    diffFile: changedFiles[0] ?? "backend/app/services/run_service.py",
+    planSteps: stepsFromPlan(plan, hasRun),
+    diffLines: diffFromText(stringValue(result.diff), hasRun),
+    diffFile: changedFiles[0] ?? (hasRun ? "No changed files" : "backend/app/services/run_service.py"),
     diffStats: diffStats(stringValue(result.diff)),
     changedFiles,
     tests: {
@@ -152,11 +170,11 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     review: {
       blockers: reviewStatus === "blocked" || reviewStatus === "changes_requested" ? 1 : 0,
       notes: reviewStatus ? 2 : 0,
-      confidence: reviewStatus === "approved" || reviewStatus === "ready" ? "96" : "84",
-      risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), "Moderate")
+      confidence: reviewStatus ? (reviewStatus === "approved" || reviewStatus === "ready" ? "96" : "84") : "n/a",
+      risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), hasRun ? "n/a" : "Moderate")
     },
     repairAttempts: String(numberValue(result.repair_attempts) ?? numberValue(summary.repair_attempts) ?? 0),
-    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, "6.4k"),
+    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, hasRun ? "n/a" : "6.4k"),
     verification: [
       { label: "Workspace verified", verified: dict(approvalBinding?.git_safety)?.status === "safe" || approvalBinding?.status === "bound" },
       { label: "Tests passed", verified: testsPassed === true },
@@ -165,18 +183,21 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
       { label: "Artifact unchanged", verified: approvalBinding?.status === "bound" }
     ],
     publish: {
-      branch: firstString(stringValue(publishResult?.branch_name), stringValue(publicationPackage?.branch_name), "repopilot/issue-42-publication-integrity"),
+      mode: stringValue(publishResult?.mode) ?? "",
+      branch: firstString(stringValue(publishResult?.branch_name), stringValue(publicationPackage?.branch_name), hasRun ? "Not prepared" : "repopilot/issue-42-publication-integrity"),
       repository,
-      title: firstString(stringValue(publicationPackage?.pr_title), "fix: harden publication lifecycle"),
-      status: stringValue(publishResult?.status) ?? "Ready",
+      title: firstString(stringValue(publicationPackage?.pr_title), hasRun ? "No pull request prepared" : "fix: harden publication lifecycle"),
+      status: stringValue(publishResult?.status) ?? (hasRun ? "Locked" : "Ready"),
       summary: stringValue(publishResult?.summary) ?? "Approve a completed run before publishing.",
-      prUrl: stringValue(publishResult?.pr_url)
+      prUrl: publishResult?.mode === "pr" && publishResult?.status === "published"
+        ? stringValue(publishResult?.pr_url)
+        : undefined
     },
     failure: {
-      failedTest: firstString(stringValue(testAnalysis?.failure_reason), "test_publish_retry_after_commit"),
-      reason: stringValue(testAnalysis?.summary) ?? "Expected push stage to resume after existing commit.",
-      repair: stringValue(dict(result.repair_decision)?.summary) ?? "RepoPilot identified the failure as repairable.",
-      attempt: `${numberValue(result.repair_attempts) ?? 1} / ${numberValue(run?.request.max_repair_attempts) ?? 2}`,
+      failedTest: firstString(stringValue(testAnalysis?.failure_reason), stringValue(llmError?.stage), hasRun ? "No failing test recorded" : "test_publish_retry_after_commit"),
+      reason: stringValue(testAnalysis?.summary) ?? stringValue(llmError?.message) ?? "Expected push stage to resume after existing commit.",
+      repair: stringValue(dict(result.repair_decision)?.summary) ?? (hasRun ? "No automated repair was available for this stop." : "RepoPilot identified the failure as repairable."),
+      attempt: `${numberValue(result.repair_attempts) ?? 0} / ${numberValue(run?.request.max_repair_attempts) ?? 2}`,
       passed: testsPassed === false ? 17 : 26,
       failed: testsPassed === false ? 2 : 0
     }
@@ -187,18 +208,31 @@ function headlineFor({
   lifecycleStatus,
   summaryStatus,
   approvalApproved,
-  publishStatus
+  publishStatus,
+  hasLlmError,
+  hasResponse
 }: {
   lifecycleStatus?: string;
   summaryStatus?: string;
   approvalApproved?: boolean | null;
   publishStatus?: string;
+  hasLlmError?: boolean;
+  hasResponse?: boolean;
 }): string {
   if (publishStatus === "published") {
     return "Pull request opened.";
   }
   if (approvalApproved) {
     return "Ready to ship.";
+  }
+  if (hasLlmError || summaryStatus === "needs_human") {
+    return "RepoPilot needs your attention.";
+  }
+  if (lifecycleStatus === "failed") {
+    return "Run failed before completion.";
+  }
+  if (lifecycleStatus === "completed" && hasResponse === false) {
+    return "Run completed without artifacts.";
   }
   if (summaryStatus === "repair_failed" || summaryStatus === "review_failed") {
     return "RepoPilot needs your attention.";
@@ -224,7 +258,7 @@ function stage(
   };
 }
 
-function stepsFromPlan(plan: Record<string, unknown> | null): string[] {
+function stepsFromPlan(plan: Record<string, unknown> | null, hasRun = false): string[] {
   const steps = stringList(plan?.steps);
   if (steps.length) {
     return steps;
@@ -233,11 +267,34 @@ function stepsFromPlan(plan: Record<string, unknown> | null): string[] {
   if (summary) {
     return [summary];
   }
+  if (hasRun) {
+    return ["No implementation plan was produced for this run."];
+  }
   return fallbackPlanSteps;
 }
 
-function diffFromText(diff?: string): DiffLine[] {
+function failureSummary(run: RunStatusResponse | null): string | undefined {
+  if (!run?.error) {
+    return undefined;
+  }
+  return run.error.message || "Run failed before RepoPilot could produce artifacts.";
+}
+
+function testDetail(testsPassed: boolean | null): string {
+  if (testsPassed === true) {
+    return "Tests passed";
+  }
+  if (testsPassed === false) {
+    return "Tests need attention";
+  }
+  return "Tests not run";
+}
+
+function diffFromText(diff?: string, hasRun = false): DiffLine[] {
   if (!diff) {
+    if (hasRun) {
+      return [{ kind: "context", text: "No diff was generated for this run." }];
+    }
     return fallbackDiffLines as DiffLine[];
   }
   return diff
@@ -251,7 +308,7 @@ function diffFromText(diff?: string): DiffLine[] {
 
 function diffStats(diff?: string): string {
   if (!diff) {
-    return "+5 -1";
+    return "+0 -0";
   }
   const lines = diff.split("\n");
   const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;

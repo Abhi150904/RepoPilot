@@ -10,6 +10,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [run, setRun] = useState<RunStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activeAction, setActiveAction] = useState<string | null>(null);
   const view = useMemo(() => buildRunView(run), [run]);
 
   useEffect(() => {
@@ -34,6 +35,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
 
   async function mutate(action: "approve" | "reject" | PublishMode) {
     setBusy(true);
+    setActiveAction(action);
     setError(null);
     try {
       if (action === "approve") {
@@ -47,6 +49,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
       setError(caught instanceof Error ? caught.message : "Run action failed.");
     } finally {
       setBusy(false);
+      setActiveAction(null);
     }
   }
 
@@ -58,6 +61,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
           run={run}
           view={view}
           isBusy={busy}
+          activeAction={activeAction}
           onApprove={() => mutate("approve")}
           onReject={() => mutate("reject")}
           onPublish={(mode) => mutate(mode)}

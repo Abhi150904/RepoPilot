@@ -13,7 +13,7 @@ from app.tools.workspace import WorkspaceError
 
 
 def test_health_endpoint_returns_ok() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.get("/health")
 
@@ -22,7 +22,7 @@ def test_health_endpoint_returns_ok() -> None:
 
 
 def test_api_returns_request_id_header() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.get("/health", headers={"x-request-id": "trace-123"})
 
@@ -213,7 +213,7 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
             }
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -229,6 +229,7 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
     )
 
     assert response.status_code == 202
+    start_body = response.json()
     assert captured["workflow_input"] == {
         "repository": "example/demo",
         "issue_number": 16,
@@ -237,11 +238,19 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
         "test_runner": "local",
         "test_command": ["python", "-m", "pytest"],
         "max_repair_attempts": 2,
+        "_run_id": start_body["run_id"],
     }
-    start_body = response.json()
     assert start_body["run_id"]
     assert start_body["lifecycle_status"] == "queued"
-    assert start_body["request"] == captured["workflow_input"]
+    assert start_body["request"] == {
+        "repository": "example/demo",
+        "issue_number": 16,
+        "apply_changes": True,
+        "run_tests": True,
+        "test_runner": "local",
+        "test_command": ["python", "-m", "pytest"],
+        "max_repair_attempts": 2,
+    }
     assert start_body["response"] is None
     assert start_body["error"] is None
 
@@ -321,7 +330,7 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
 
 
 def test_get_run_returns_404_for_unknown_run() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.get("/runs/missing", headers={"x-request-id": "trace-404"})
 
@@ -345,7 +354,7 @@ def test_approve_run_updates_completed_run(monkeypatch) -> None:
             return _reviewed_run_result()
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
 
     response = client.post(f"/runs/{started.json()['run_id']}/approve", json={"note": "ship it"})
@@ -367,7 +376,7 @@ def test_reject_run_updates_completed_run(monkeypatch) -> None:
             return _reviewed_run_result()
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
 
     response = client.post(
@@ -391,7 +400,7 @@ def test_publish_requires_approval(monkeypatch) -> None:
             return _reviewed_run_result()
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
 
     response = client.post(f"/runs/{started.json()['run_id']}/publish", json={"mode": "dry_run"})
@@ -419,7 +428,7 @@ def test_publish_dry_run_updates_run_after_approval(monkeypatch) -> None:
             summary="Git safety check found only RepoPilot-applied changes.",
         ),
     )
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
     client.post(f"/runs/{started.json()['run_id']}/approve", json={})
 
@@ -451,7 +460,7 @@ def test_publish_rejects_workspace_changed_after_approval(tmp_path, monkeypatch)
             return result
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
     started = client.post("/runs", json={"issue": "Login endpoint fails"})
     client.post(f"/runs/{started.json()['run_id']}/approve", json={})
 
@@ -463,7 +472,7 @@ def test_publish_rejects_workspace_changed_after_approval(tmp_path, monkeypatch)
 
 
 def test_create_run_validates_required_issue_input() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post("/runs", json={}, headers={"x-request-id": "trace-validation"})
 
@@ -475,7 +484,7 @@ def test_create_run_validates_required_issue_input() -> None:
 
 
 def test_create_run_rejects_local_apply_without_workspace() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -491,7 +500,7 @@ def test_create_run_rejects_local_apply_without_workspace() -> None:
 
 
 def test_create_run_rejects_empty_test_command() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -509,7 +518,7 @@ def test_create_run_rejects_empty_test_command() -> None:
 
 
 def test_create_run_rejects_blank_command_token() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -527,7 +536,7 @@ def test_create_run_rejects_blank_command_token() -> None:
 
 
 def test_create_run_rejects_publication_without_apply_and_tests() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -545,7 +554,7 @@ def test_create_run_rejects_publication_without_apply_and_tests() -> None:
 
 
 def test_create_run_rejects_publish_push_without_local_publish() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -565,7 +574,7 @@ def test_create_run_rejects_publish_push_without_local_publish() -> None:
 
 
 def test_create_run_rejects_publish_pr_without_push() -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -592,7 +601,7 @@ def test_create_run_stores_github_errors(monkeypatch) -> None:
             raise GitHubError("GitHub request failed: 401 Bad credentials")
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -618,7 +627,7 @@ def test_create_run_stores_workspace_errors(monkeypatch) -> None:
             raise WorkspaceError("Run workspace already exists")
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",
@@ -644,7 +653,7 @@ def test_failed_run_error_keeps_request_id_and_hides_raw_exception(monkeypatch) 
             raise RuntimeError("secret-token leaked in exception")
 
     monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
-    client = TestClient(api_module.create_app())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
 
     response = client.post(
         "/runs",

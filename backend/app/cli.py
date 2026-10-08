@@ -364,11 +364,15 @@ def _config_report() -> dict[str, Any]:
     settings = get_settings()
     provider = settings.llm_provider
     gemini_required = provider.lower() == "gemini"
-    gemini_configured = bool(settings.gemini_api_key)
+    groq_required = provider.lower() == "groq"
+    gemini_configured = bool(getattr(settings, "gemini_api_key", None))
+    groq_configured = bool(getattr(settings, "groq_api_key", None))
     github_configured = bool(settings.github_token)
     issues = []
     if gemini_required and not gemini_configured:
         issues.append("GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini.")
+    if groq_required and not groq_configured:
+        issues.append("GROQ_API_KEY is required when REPO_PILOT_LLM_PROVIDER=groq.")
     issues.extend(deployment_issues(settings))
     warnings = deployment_warnings(settings)
 
@@ -386,6 +390,11 @@ def _config_report() -> dict[str, Any]:
             "configured": gemini_configured,
             "status": "configured" if gemini_configured else "missing",
         },
+        "groq_api_key": {
+            "required": groq_required,
+            "configured": groq_configured,
+            "status": "configured" if groq_configured else "missing",
+        },
         "github_token": {
             "configured": github_configured,
             "status": "configured" if github_configured else "missing",
@@ -401,6 +410,7 @@ def _config_report() -> dict[str, Any]:
 
 def _print_config_report(report: dict[str, Any]) -> None:
     gemini = _dict_or_none(report.get("gemini_api_key")) or {}
+    groq = _dict_or_none(report.get("groq_api_key")) or {}
     github = _dict_or_none(report.get("github_token")) or {}
     cli_install = _dict_or_none(report.get("cli_install")) or {}
 
@@ -414,6 +424,7 @@ def _print_config_report(report: dict[str, Any]) -> None:
     print(f"LLM provider: {report['llm_provider']}")
     print(f"LLM model: {report['llm_model']}")
     print(f"Gemini API key: {gemini.get('status', 'unknown')}")
+    print(f"Groq API key: {groq.get('status', 'unknown')}")
     print(f"GitHub token: {github.get('status', 'unknown')}")
     print(f"Workspace root: {report['workspace_root']}")
     print(f"Default test command: {report['default_test_command']}")

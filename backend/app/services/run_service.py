@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
 import subprocess
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 
 from app.agents.approval import ApprovalGate
 from app.agents.publication import PublicationPreparer
@@ -21,6 +22,7 @@ from app.api.schemas import (
     RunResponse,
     RunStatusResponse,
 )
+from app.auth.models import RunOwner
 from app.core.audit import (
     RUN_APPROVED,
     RUN_COMPLETED,
@@ -37,6 +39,9 @@ from app.tools.git import inspect_git_safety
 from app.tools.github import GitHubClient
 
 
+logger = logging.getLogger(__name__)
+
+
 class RunServiceError(Exception):
     def __init__(self, *, status_code: int, code: str, message: str) -> None:
         super().__init__(message)
@@ -50,21 +55,33 @@ class RepoPilotRunService:
         self,
         run_store: RunStore | None = None,
         audit_logger: AuditLogger | None = None,
+        installation_token_resolver: Callable[[RunOwner], str | None] | None = None,
     ) -> None:
         self.run_store = run_store or RunStore()
         self.audit_logger = audit_logger or AuditLogger()
+        self._installation_token_resolver = installation_token_resolver
         self._request_ids: dict[str, str] = {}
+        self._owners: dict[str, RunOwner] = {}
         self._transition_lock = Lock()
 
-    def create_run(self, request: RunRequest, *, request_id: str | None = None) -> RunStatusResponse:
+    def create_run(
+        self,
+        request: RunRequest,
+        *,
+        request_id: str | None = None,
+        owner: RunOwner | None = None,
+    ) -> RunStatusResponse:
         run = self.run_store.create(_workflow_input(request))
         if request_id:
             self._request_ids[run.run_id] = request_id
+        if owner:
+            self._owners[run.run_id] = owner
         self.audit_logger.record(
             RUN_CREATED,
             run_id=run.run_id,
             metadata={
                 **_trace_metadata(run_id=run.run_id, request_id=request_id),
+                **_owner_metadata(owner),
                 "request": _audit_request_metadata(run.request),
             },
         )
@@ -82,7 +99,13 @@ class RepoPilotRunService:
             metadata=_trace_metadata(run_id=run_id, request_id=request_id),
         )
         try:
-            result = build_workflow().invoke(run.request)
+            result = build_workflow().invoke(
+                _workflow_runtime_input(
+                    run.request,
+                    run_id=run_id,
+                    github_token=self._github_token_for_run(run_id),
+                )
+            )
             response = _run_response(result)
             self.run_store.mark_completed(run_id, response)
             self.audit_logger.record(
@@ -96,6 +119,12 @@ class RepoPilotRunService:
                 },
             )
         except Exception as exc:
+            logger.exception(
+                "RepoPilot run failed: run_id=%s request_id=%s error_type=%s",
+                run_id,
+                request_id,
+                exc.__class__.__name__,
+            )
             self.run_store.mark_failed(run_id, exc, request_id=request_id)
             self.audit_logger.record(
                 RUN_FAILED,
@@ -116,10 +145,16 @@ class RepoPilotRunService:
     def get_result(self, run_id: str) -> RunResponse:
         return self._completed_response(run_id)
 
+    def get_owner(self, run_id: str) -> RunOwner | None:
+        self.get_run(run_id)
+        return self._owners.get(run_id)
+
     def approve_run(
         self,
         run_id: str,
         request: ApprovalRequest | None = None,
+        actor: str = "human",
+        actor_context: dict[str, object] | None = None,
     ) -> RunStatusResponse:
         with self._transition_lock:
             response = self._completed_response(run_id)
@@ -135,7 +170,8 @@ class RepoPilotRunService:
             self.audit_logger.record(
                 RUN_APPROVED,
                 run_id=run_id,
-                actor="human",
+                actor=actor,
+                actor_context=actor_context,
                 metadata={
                     **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
                     "has_note": bool(request and request.note),
@@ -147,6 +183,8 @@ class RepoPilotRunService:
         self,
         run_id: str,
         request: RejectRequest | None = None,
+        actor: str = "human",
+        actor_context: dict[str, object] | None = None,
     ) -> RunStatusResponse:
         with self._transition_lock:
             response = self._completed_response(run_id)
@@ -173,7 +211,8 @@ class RepoPilotRunService:
             self.audit_logger.record(
                 RUN_REJECTED,
                 run_id=run_id,
-                actor="human",
+                actor=actor,
+                actor_context=actor_context,
                 metadata={
                     **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
                     "has_reason": bool(request and request.reason),
@@ -181,7 +220,13 @@ class RepoPilotRunService:
             )
             return updated
 
-    def publish_run(self, run_id: str, request: PublishRequest) -> RunStatusResponse:
+    def publish_run(
+        self,
+        run_id: str,
+        request: PublishRequest,
+        actor: str = "system",
+        actor_context: dict[str, object] | None = None,
+    ) -> RunStatusResponse:
         with self._transition_lock:
             response = self._completed_response(run_id)
             result = dict(response.result)
@@ -199,6 +244,7 @@ class RepoPilotRunService:
                 result=result,
                 mode=request.mode,
                 previous=_publish_result(result),
+                github_token=self._github_token_for_run(run_id),
             )
             result["publication_package"] = package.model_dump()
             result["publish_result"] = publish_result.model_dump()
@@ -207,6 +253,8 @@ class RepoPilotRunService:
             self.audit_logger.record(
                 RUN_PUBLISHED,
                 run_id=run_id,
+                actor=actor,
+                actor_context=actor_context,
                 metadata={
                     **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
                     "mode": request.mode,
@@ -236,6 +284,12 @@ class RepoPilotRunService:
             )
         return run.response
 
+    def _github_token_for_run(self, run_id: str) -> str | None:
+        owner = self._owners.get(run_id)
+        if owner is None or self._installation_token_resolver is None:
+            return None
+        return self._installation_token_resolver(owner)
+
 
 def _workflow_input(request: RunRequest) -> dict[str, Any]:
     data: dict[str, Any] = {}
@@ -264,6 +318,19 @@ def _workflow_input(request: RunRequest) -> dict[str, Any]:
     return data
 
 
+def _workflow_runtime_input(
+    request: dict[str, Any],
+    *,
+    run_id: str,
+    github_token: str | None,
+) -> dict[str, Any]:
+    data = dict(request)
+    data["_run_id"] = run_id
+    if github_token:
+        data["_github_token"] = github_token
+    return data
+
+
 def _audit_request_metadata(request: dict[str, Any]) -> dict[str, Any]:
     return {
         "mode": "github" if "repository" in request else "issue_text",
@@ -285,7 +352,16 @@ def _trace_metadata(*, run_id: str, request_id: str | None = None) -> dict[str, 
     return metadata
 
 
+def _owner_metadata(owner: RunOwner | None) -> dict[str, object]:
+    if owner is None:
+        return {}
+    return {
+        "owner": owner.actor_context(),
+    }
+
+
 def _run_response(result: dict[str, Any]) -> RunResponse:
+    result = _public_result(result)
     summary = result.get("run_summary")
     if not isinstance(summary, dict):
         raise ValueError("Workflow completed without a run summary.")
@@ -297,6 +373,14 @@ def _run_response(result: dict[str, Any]) -> RunResponse:
         run_summary=summary,
         result=dict(result),
     )
+
+
+def _public_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in result.items()
+        if not key.startswith("_") and "token" not in key.lower() and "secret" not in key.lower()
+    }
 
 
 def _review_result(result: dict[str, Any]) -> ReviewResult:
@@ -447,8 +531,12 @@ def _publish(
     result: dict[str, Any],
     mode: str,
     previous: PublishResult | None = None,
+    github_token: str | None = None,
 ) -> PublishResult:
-    executor = PublishExecutor(workspace_path=_string_or_none(result.get("workspace_path")))
+    executor = PublishExecutor(
+        workspace_path=_string_or_none(result.get("workspace_path")),
+        github_token=github_token,
+    )
     if mode == "dry_run":
         return executor.dry_run(package)
 
@@ -473,7 +561,7 @@ def _publish(
         package=package,
         push_result=push_result,
         repository=_string_or_none(result.get("repository")),
-        github=GitHubClient(),
+        github=GitHubClient(token=github_token),
     )
 
 

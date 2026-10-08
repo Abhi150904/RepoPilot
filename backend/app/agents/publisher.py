@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+from base64 import b64encode
 
 from app.schemas.execution import PublicationPackage, PublishResult
 from app.tools.github import GitHubClient, GitHubError
@@ -10,8 +11,9 @@ from app.tools.github import GitHubClient, GitHubError
 class PublishExecutor:
     """Validates publication readiness without performing side effects."""
 
-    def __init__(self, workspace_path: str | None = None):
+    def __init__(self, workspace_path: str | None = None, github_token: str | None = None):
         self.workspace_path = workspace_path
+        self.github_token = github_token
 
     def dry_run(self, package: PublicationPackage) -> PublishResult:
         blockers = _blockers(package)
@@ -152,6 +154,7 @@ class PublishExecutor:
         completed = _run(
             args=["git", "push", "-u", remote_name, branch_name],
             root=root,
+            github_token=self.github_token,
         )
         if completed.returncode != 0:
             return PublishResult(
@@ -300,9 +303,13 @@ def _pr_blockers(push_result: PublishResult, repository: str | None) -> list[str
     return blockers
 
 
-def _run(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str],
+    root: Path,
+    github_token: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        args,
+        ["git", *_git_auth_args(github_token), *args[1:]] if args[:1] == ["git"] else args,
         cwd=root,
         capture_output=True,
         text=True,
@@ -356,3 +363,13 @@ def _recover_existing_local_commit(
         blockers=[],
         next_action="push_branch",
     )
+
+
+def _git_auth_args(token: str | None) -> list[str]:
+    if not token:
+        return []
+    encoded = b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return [
+        "-c",
+        f"http.https://github.com/.extraheader=AUTHORIZATION: basic {encoded}",
+    ]

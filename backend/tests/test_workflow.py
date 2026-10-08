@@ -23,6 +23,42 @@ from app.tools.github import GitHubError
 from app.tools.workspace import RunWorkspace
 
 
+def test_workspace_branch_name_includes_run_suffix_when_available() -> None:
+    import app.graph.workflow as workflow_module
+
+    branch_name = workflow_module._workspace_branch_name(
+        {
+            "issue_number": 16,
+            "issue_title": "Login endpoint returns 500 when email is missing.",
+            "_run_id": "abcdef1234567890",
+        }
+    )
+
+    assert branch_name == "repopilot/issue-16-login-endpoint-returns-500-when-email-is-abcdef12"
+
+
+def test_node_workspace_defaults_to_npm_test_and_local_runner(tmp_path) -> None:
+    import app.graph.workflow as workflow_module
+
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}\n')
+
+    command = workflow_module._test_command_for_workspace(str(tmp_path), None)
+    runner = workflow_module._test_runner_for_workspace(str(tmp_path), "docker", command)
+
+    assert command == ["npm", "test"]
+    assert runner == "local"
+
+
+def test_python_workspace_keeps_pytest_docker_default(tmp_path) -> None:
+    import app.graph.workflow as workflow_module
+
+    command = workflow_module._test_command_for_workspace(str(tmp_path), None)
+    runner = workflow_module._test_runner_for_workspace(str(tmp_path), "docker", command)
+
+    assert command == ["python", "-m", "pytest", "-p", "no:cacheprovider"]
+    assert runner == "docker"
+
+
 @pytest.fixture(autouse=True)
 def use_mock_llm_provider(monkeypatch) -> None:
     import app.graph.workflow as workflow_module

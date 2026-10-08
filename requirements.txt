@@ -3,5 +3,6 @@ pydantic>=2.7.0
 pydantic-settings>=2.2.0
 python-dotenv>=1.0.0
 httpx>=0.28.0
+PyJWT[crypto]>=2.8.0
 uvicorn>=0.30.0
 pytest>=8.0.0

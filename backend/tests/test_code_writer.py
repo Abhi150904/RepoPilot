@@ -278,8 +278,6 @@ def test_apply_change_set_rejects_wrong_actions() -> None:
     fs = WorkspaceFileSystem(root=root)
 
     try:
-        fs.write_text("src/existing.py", "exists\n")
-
         with pytest.raises(PatchApplicationError, match="missing file"):
             apply_change_set(
                 change_set=CodeChangeSet(
@@ -295,21 +293,34 @@ def test_apply_change_set_rejects_wrong_actions() -> None:
                 ),
                 filesystem=fs,
             )
+    finally:
+        _remove_workspace_dir(root)
 
-        with pytest.raises(PatchApplicationError, match="existing file"):
-            apply_change_set(
-                change_set=CodeChangeSet(
-                    summary="Existing create",
-                    changes=[
-                        FileChange(
-                            path="src/existing.py",
-                            action="create",
-                            explanation="Already there",
-                            proposed_content="content\n",
-                        )
-                    ],
-                ),
-                filesystem=fs,
-            )
+
+def test_apply_change_set_treats_create_existing_file_as_modify() -> None:
+    root = _make_workspace_dir()
+    fs = WorkspaceFileSystem(root=root)
+
+    try:
+        fs.write_text("src/existing.py", "old content\n")
+        result = apply_change_set(
+            change_set=CodeChangeSet(
+                summary="Update existing file",
+                changes=[
+                    FileChange(
+                        path="src/existing.py",
+                        action="create",
+                        explanation="Model mislabeled an existing file update.",
+                        proposed_content="new content\n",
+                    )
+                ],
+            ),
+            filesystem=fs,
+        )
+
+        assert result.modified_files == ["src/existing.py"]
+        assert fs.read_text("src/existing.py") == "new content\n"
+        assert "-old content" in result.diff
+        assert "+new content" in result.diff
     finally:
         _remove_workspace_dir(root)
