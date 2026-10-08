@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createRun, getHealth, RepoPilotApiError } from "@/lib/api";
+import { createRun, getHealth, listRuns, RepoPilotApiError } from "@/lib/api";
 
 describe("RepoPilot API client", () => {
   afterEach(() => {
@@ -56,6 +56,38 @@ describe("RepoPilot API client", () => {
       status: 422
     });
   });
+
+  it("lists durable runs from the API", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            run_id: "run-1",
+            lifecycle_status: "completed",
+            publication_status: "ready",
+            request: { repository: "example/demo", issue_number: 1 },
+            events: [],
+            response: null,
+            error: null
+          }
+        ]),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const runs = await listRuns();
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0].run_id).toBe("run-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/runs",
+      expect.objectContaining({
+        headers: {}
+      })
+    );
+  });
+
 
   it("reports unreachable APIs consistently", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network")));

@@ -53,6 +53,7 @@ export type RunError = {
   code: string;
   message: string;
   type?: string | null;
+  details?: Record<string, unknown>;
 };
 
 export type RunResponse = {
@@ -65,10 +66,21 @@ export type RunResponse = {
 
 export type RunStatusResponse = {
   run_id: string;
-  lifecycle_status: "queued" | "running" | "completed" | "failed";
+  lifecycle_status: "queued" | "running" | "completed" | "failed" | "interrupted";
+  publication_status?: "not_started" | "ready" | "publishing" | "published" | "failed";
+  created_at?: string;
+  updated_at?: string;
   request: Record<string, unknown>;
+  events?: RunEvent[];
   response?: RunResponse | null;
   error?: RunError | null;
+};
+
+export type RunEvent = {
+  run_id: string;
+  event_type: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
 };
 
 export class RepoPilotApiError extends Error {
@@ -112,6 +124,10 @@ export async function createRun(request: RunRequest): Promise<RunStatusResponse>
     method: "POST",
     body: JSON.stringify(request)
   });
+}
+
+export async function listRuns(): Promise<RunStatusResponse[]> {
+  return apiFetch<RunStatusResponse[]>("/runs");
 }
 
 export async function getHealth(): Promise<HealthResponse> {

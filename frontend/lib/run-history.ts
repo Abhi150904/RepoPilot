@@ -23,19 +23,30 @@ export function readRunHistory(): StoredRunSummary[] {
 }
 
 export function rememberRun(run: RunStatusResponse): StoredRunSummary[] {
-  const next: StoredRunSummary = {
-    runId: run.run_id,
-    repository: String(run.request.repository ?? "Issue text"),
-    issue: run.request.issue_number ? `#${run.request.issue_number}` : "Manual issue",
-    status: run.lifecycle_status,
-    updatedAt: new Date().toISOString()
-  };
+  const next = summaryFromRun(run);
   const existing = readRunHistory().filter((item) => item.runId !== run.run_id);
   const history = [next, ...existing].slice(0, 12);
   if (typeof window !== "undefined") {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
   }
   return history;
+}
+
+export function summariesFromRuns(runs: RunStatusResponse[]): StoredRunSummary[] {
+  return runs.map(summaryFromRun);
+}
+
+export function summaryFromRun(run: RunStatusResponse): StoredRunSummary {
+  const result = run.response?.result ?? {};
+  const repository = stringValue(result.repository) ?? String(run.request.repository ?? "Issue text");
+  const issueNumber = run.request.issue_number ?? result.issue_number;
+  return {
+    runId: run.run_id,
+    repository,
+    issue: typeof issueNumber === "number" ? `#${issueNumber}` : "Manual issue",
+    status: run.lifecycle_status,
+    updatedAt: stringValue(run.updated_at) ?? new Date().toISOString()
+  };
 }
 
 export function stageForStatus(status: string): string {
@@ -49,4 +60,8 @@ export function stageForStatus(status: string): string {
     return "Needs repair";
   }
   return "Review";
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
 }

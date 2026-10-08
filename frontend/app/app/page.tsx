@@ -5,9 +5,9 @@ import { useEffect, useState } from "react";
 import { ArrowRight, Check, Play } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/button";
-import { createRun, type RunRequest } from "@/lib/api";
+import { createRun, listRuns, type RunRequest } from "@/lib/api";
 import { buildRunRequest } from "@/lib/run-request";
-import { readRunHistory, rememberRun, type StoredRunSummary } from "@/lib/run-history";
+import { readRunHistory, rememberRun, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 export default function CommandCenterPage() {
   const [history, setHistory] = useState<StoredRunSummary[]>([]);
@@ -17,7 +17,23 @@ export default function CommandCenterPage() {
   const [issueNumber, setIssueNumber] = useState("");
 
   useEffect(() => {
-    setHistory(readRunHistory());
+    let active = true;
+    async function loadRuns() {
+      try {
+        const backendRuns = await listRuns();
+        if (active) {
+          setHistory(summariesFromRuns(backendRuns));
+        }
+      } catch {
+        if (active) {
+          setHistory(readRunHistory());
+        }
+      }
+    }
+    loadRuns();
+    return () => {
+      active = false;
+    };
   }, []);
 
   async function startRun() {

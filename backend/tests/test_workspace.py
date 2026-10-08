@@ -110,6 +110,8 @@ def test_clone_repository_reuses_existing_git_repo(monkeypatch, tmp_path) -> Non
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
         if args == ["git", "remote", "get-url", "origin"]:
             return SimpleNamespace(returncode=0, stdout="git@github.com:Abhi150904/Wandr.git\n", stderr="")
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess call: {args}")
 
     monkeypatch.setattr(workspace_module.subprocess, "run", fake_run)
@@ -121,6 +123,7 @@ def test_clone_repository_reuses_existing_git_repo(monkeypatch, tmp_path) -> Non
     assert calls == [
         ["git", "rev-parse", "--is-inside-work-tree"],
         ["git", "remote", "get-url", "origin"],
+        ["git", "fetch", "--prune", "origin"],
     ]
 
 
@@ -225,6 +228,8 @@ def test_create_run_worktree_creates_branch_workspace(monkeypatch, tmp_path) -> 
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
         if args == ["git", "remote", "get-url", "origin"]:
             return SimpleNamespace(returncode=0, stdout="https://github.com/Abhi150904/Wandr.git\n", stderr="")
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:3] == ["git", "show-ref", "--verify"]:
             return SimpleNamespace(returncode=1, stdout="", stderr="")
         if args[:4] == ["git", "worktree", "add", "-b"]:
@@ -255,6 +260,38 @@ def test_create_run_worktree_creates_branch_workspace(monkeypatch, tmp_path) -> 
     ]
 
 
+def test_create_run_worktree_defaults_to_remote_head(monkeypatch, tmp_path) -> None:
+    settings = Settings(workspace_root=str(tmp_path / "workspaces"), _env_file=None)
+    repo_dir = tmp_path / "workspaces" / "Abhi150904__Wandr"
+    repo_dir.mkdir(parents=True)
+
+    def fake_run(args, cwd=None, capture_output=True, text=True, check=False):
+        if args == ["git", "rev-parse", "--is-inside-work-tree"]:
+            return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if args == ["git", "remote", "get-url", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="https://github.com/Abhi150904/Wandr.git\n", stderr="")
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[:3] == ["git", "show-ref", "--verify"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if args == ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="origin/main\n", stderr="")
+        if args[:4] == ["git", "worktree", "add", "-b"]:
+            Path(args[5]).mkdir(parents=True)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr(workspace_module.subprocess, "run", fake_run)
+
+    result = create_run_worktree(
+        repo="Abhi150904/Wandr",
+        branch_name="repopilot/issue-17",
+        settings=settings,
+    )
+
+    assert result.base_ref == "origin/main"
+
+
 def test_create_run_worktree_rejects_existing_run_path(monkeypatch, tmp_path) -> None:
     settings = Settings(workspace_root=str(tmp_path / "workspaces"), _env_file=None)
     repo_dir = tmp_path / "workspaces" / "Abhi150904__Wandr"
@@ -265,6 +302,8 @@ def test_create_run_worktree_rejects_existing_run_path(monkeypatch, tmp_path) ->
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
         if args == ["git", "remote", "get-url", "origin"]:
             return SimpleNamespace(returncode=0, stdout="https://github.com/Abhi150904/Wandr.git\n", stderr="")
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess call: {args}")
 
     monkeypatch.setattr(workspace_module.subprocess, "run", fake_run)
@@ -291,6 +330,8 @@ def test_create_run_worktree_rejects_existing_branch(monkeypatch, tmp_path) -> N
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
         if args == ["git", "remote", "get-url", "origin"]:
             return SimpleNamespace(returncode=0, stdout="https://github.com/Abhi150904/Wandr.git\n", stderr="")
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[:3] == ["git", "show-ref", "--verify"]:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess call: {args}")

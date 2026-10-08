@@ -12,10 +12,10 @@ export function RunTimeline({ view }: { view: RunViewModel }) {
         <span className="font-display text-xs text-cyan-300">{view.timeline.filter((item) => item.state === "complete").length}/{view.timeline.length}</span>
       </div>
       <div className="grid gap-1">
-        {view.timeline.map((item) => {
+        {view.timeline.map((item, index) => {
           const Icon = item.icon;
           return (
-            <div key={item.label} className="grid grid-cols-[32px_1fr] gap-3 border-b border-[var(--border)] py-3 last:border-b-0">
+            <div key={`${item.label}-${index}`} className="grid grid-cols-[32px_1fr] gap-3 border-b border-[var(--border)] py-3 last:border-b-0">
               <span className="grid h-8 w-8 place-items-center rounded-lg bg-[var(--surface-elevated)] text-cyan-300">
                 <Icon size={16} />
               </span>

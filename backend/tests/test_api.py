@@ -329,6 +329,43 @@ def test_create_run_invokes_workflow(monkeypatch) -> None:
     }
 
 
+def test_create_run_idempotency_reuses_same_payload(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            return _reviewed_run_result()
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
+    payload = {"issue": "Login endpoint fails"}
+
+    first = client.post("/runs", json=payload, headers={"Idempotency-Key": "idem-run-1"})
+    second = client.post("/runs", json=payload, headers={"Idempotency-Key": "idem-run-1"})
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["run_id"] == first.json()["run_id"]
+
+
+def test_create_run_idempotency_conflicts_for_different_payload(monkeypatch) -> None:
+    import app.api.app as api_module
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            return _reviewed_run_result()
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    client = TestClient(api_module.create_app(settings=Settings(_env_file=None)))
+
+    first = client.post("/runs", json={"issue": "Login endpoint fails"}, headers={"Idempotency-Key": "idem-run-1"})
+    conflict = client.post("/runs", json={"issue": "Search endpoint fails"}, headers={"Idempotency-Key": "idem-run-1"})
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+
+
 def test_get_run_returns_404_for_unknown_run() -> None:
     client = TestClient(create_app(settings=Settings(_env_file=None)))
 

@@ -4,16 +4,39 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { ButtonLink } from "@/components/button";
-import { readRunHistory, stageForStatus, type StoredRunSummary } from "@/lib/run-history";
+import { listRuns } from "@/lib/api";
+import { readRunHistory, stageForStatus, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 const filters = ["All", "Running", "Needs review", "Completed", "Failed"];
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<StoredRunSummary[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState("All");
 
   useEffect(() => {
-    setRuns(readRunHistory());
+    let active = true;
+    async function loadRuns() {
+      setIsLoading(true);
+      try {
+        const backendRuns = await listRuns();
+        if (active) {
+          setRuns(summariesFromRuns(backendRuns));
+        }
+      } catch {
+        if (active) {
+          setRuns(readRunHistory());
+        }
+      } finally {
+        if (active) {
+          setIsLoading(false);
+        }
+      }
+    }
+    loadRuns();
+    return () => {
+      active = false;
+    };
   }, []);
 
   const visibleRuns = useMemo(() => {
@@ -56,6 +79,11 @@ export default function RunsPage() {
             <span>Duration</span>
             <span>Updated</span>
           </div>
+          {isLoading ? (
+            <div className="px-5 py-10">
+              <p className="text-sm text-[var(--text-secondary)]">Loading run history...</p>
+            </div>
+          ) : null}
           {visibleRuns.map((run) => (
             <Link key={run.runId} href={`/runs/${run.runId}`} className="grid min-w-[900px] grid-cols-[1fr_120px_140px_110px_100px_100px_170px] border-b border-[var(--border)] px-5 py-4 text-sm hover:bg-[var(--surface-elevated)]">
               <span>{run.repository}</span>
@@ -67,7 +95,7 @@ export default function RunsPage() {
               <span className="text-[var(--text-secondary)]">{new Date(run.updatedAt).toLocaleString()}</span>
             </Link>
           ))}
-          {!visibleRuns.length ? (
+          {!isLoading && !visibleRuns.length ? (
             <div className="px-5 py-10">
               <p className="text-sm text-[var(--text-secondary)]">No runs yet. Start your first RepoPilot run to see its execution history here.</p>
               <ButtonLink className="mt-4" href="/app" variant="primary">Start a run</ButtonLink>

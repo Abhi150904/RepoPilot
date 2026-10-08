@@ -206,10 +206,12 @@ class ErrorResponse(BaseModel):
 
 class RunStatusResponse(BaseModel):
     run_id: str
-    lifecycle_status: Literal["queued", "running", "completed", "failed"]
+    lifecycle_status: Literal["queued", "running", "completed", "failed", "interrupted"]
+    publication_status: Literal["not_started", "ready", "publishing", "published", "failed"] = "not_started"
     created_at: datetime
     updated_at: datetime
     request: dict[str, Any]
+    events: list[dict[str, Any]] = Field(default_factory=list)
     response: RunResponse | None = None
     error: RunError | None = None
 

@@ -9,6 +9,7 @@ from app.tools.sandbox import (
     SandboxError,
     _count_pytest_results,
     _resolve_command,
+    _test_environment,
     _truncate_output,
     build_docker_command,
     run_tests_in_docker,
@@ -105,6 +106,7 @@ def test_run_tests_locally_installs_node_dependencies_when_missing(tmp_path, mon
     calls: list[list[str]] = []
 
     def fake_run(command, **kwargs):
+        assert kwargs["env"]["CI"] == "true"
         calls.append(command)
         if command[1:] == ["ci"]:
             (tmp_path / "node_modules").mkdir()
@@ -124,6 +126,15 @@ def test_run_tests_locally_installs_node_dependencies_when_missing(tmp_path, mon
     assert all(Path(call[0]).name.lower().startswith("npm") for call in calls)
     assert result.exit_code == 0
     assert result.passed == 1
+
+
+def test_test_environment_preserves_existing_ci(monkeypatch) -> None:
+    monkeypatch.setenv("CI", "existing")
+
+    env = _test_environment()
+
+    assert env["CI"] == "existing"
+    assert env["NO_COLOR"] == "1"
 
 
 def test_run_tests_locally_returns_install_failure(tmp_path, monkeypatch) -> None:

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import logging
 
+from sqlalchemy import create_engine, select
+
 from app.api.schemas import PublishRequest, RunRequest
 from app.core.audit import (
+    AuditEventRow,
     RUN_APPROVED,
     RUN_COMPLETED,
     RUN_CREATED,
@@ -60,6 +63,28 @@ def test_audit_logger_caps_large_metadata(caplog) -> None:
     assert payload["metadata"]["diff"].endswith("[truncated 300 chars]")
     assert payload["metadata"]["items"][-1] == {"_truncated": True, "remaining": 5}
     assert payload["metadata"]["mapping"]["_truncated"] is True
+
+
+def test_audit_logger_persists_sanitized_events() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    audit = AuditLogger(logger=logging.getLogger("test.repopilot.audit.persist"), engine=engine)
+
+    audit.record(
+        RUN_CREATED,
+        run_id="run-1",
+        actor="github_user",
+        actor_context={"github_login": "octo", "token": "secret"},
+        metadata={"request_id": "trace-1", "api_key": "secret-key"},
+    )
+
+    with audit._session_factory() as session:  # type: ignore[union-attr]
+        row = session.scalars(select(AuditEventRow)).one()
+
+    assert row.event_type == RUN_CREATED
+    assert row.actor == "github_user"
+    assert row.run_id == "run-1"
+    assert row.actor_context == {"github_login": "octo", "token": "[redacted]"}
+    assert row.metadata_json == {"request_id": "trace-1", "api_key": "[redacted]"}
 
 
 def test_run_service_audits_lifecycle_without_raw_issue(monkeypatch) -> None:
@@ -126,6 +151,11 @@ def test_run_service_audits_approval_rejection_and_publication(monkeypatch) -> N
     rejected_run = service.create_run(RunRequest(issue="Destination fails"))
     service.execute_run(rejected_run.run_id)
     service.reject_run(rejected_run.run_id)
+
+    published_run = service.get_run(run.run_id)
+    assert published_run.publication_status == "ready"
+    assert "run.publication_started" in [event["event_type"] for event in published_run.events]
+    assert "run.publication_ready" in [event["event_type"] for event in published_run.events]
 
     event_types = [event["event_type"] for event in audit.events]
     assert RUN_APPROVED in event_types

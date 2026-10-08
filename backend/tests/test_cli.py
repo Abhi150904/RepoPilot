@@ -403,6 +403,8 @@ def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
     assert "LLM model: gemini-test-model" in output
     assert "Gemini API key: configured" in output
     assert "GitHub token: configured" in output
+    assert "Database: missing" in output
+    assert "Inline run execution: enabled" in output
     assert "CLI install: available" in output
 
 
@@ -436,7 +438,53 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
         "status": "configured",
     }
     assert body["github_token"]["status"] == "configured"
+    assert body["database"] == {
+        "required": False,
+        "configured": False,
+        "status": "missing",
+    }
+    assert body["worker"] == {
+        "required": False,
+        "command": "repopilot worker run",
+        "queue_configured": True,
+    }
+    assert body["inline_run_execution"] == {
+        "enabled": True,
+        "source": "default",
+    }
     assert body["cli_install"] == {"available": False, "path": None}
+
+
+def test_cli_config_validate_reports_hosted_worker_shape(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+
+    monkeypatch.setenv("REPO_PILOT_HOSTED_MODE", "true")
+    monkeypatch.setenv("REPO_PILOT_PUBLIC_BASE_URL", "https://repopilot.example")
+    monkeypatch.setenv("REPO_PILOT_CORS_ORIGINS", "https://repopilot.example")
+    monkeypatch.setenv("REPOPILOT_DATABASE_URL", "postgresql+psycopg://example")
+    monkeypatch.setenv("REPO_PILOT_GITHUB_CLIENT_ID", "client-id")
+    monkeypatch.setenv("REPO_PILOT_GITHUB_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("REPO_PILOT_GITHUB_APP_ID", "123")
+    monkeypatch.setenv("REPO_PILOT_GITHUB_APP_PRIVATE_KEY", "private-key")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("REPOPILOT_GITHUB_TOKEN", raising=False)
+
+    exit_code = cli.main(["config", "validate", "--json"])
+
+    body = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert body["valid"] is True
+    assert body["database"]["status"] == "configured"
+    assert body["worker"] == {
+        "required": True,
+        "command": "repopilot worker run",
+        "queue_configured": True,
+    }
+    assert body["inline_run_execution"] == {
+        "enabled": False,
+        "source": "default",
+    }
+    assert any("separate worker process" in warning for warning in body["warnings"])
 
 
 def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
@@ -456,6 +504,8 @@ def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
             deployment_environment="local",
             hosted_mode=False,
             public_base_url=None,
+            database_url=None,
+            inline_run_execution=None,
             cors_origins="http://localhost:3000",
             workspace_root=".repopilot/workspaces",
             default_test_command="python -m pytest",
@@ -500,6 +550,74 @@ def test_cli_config_validate_rejects_hosted_wildcard_cors(monkeypatch, capsys) -
     assert exit_code == 1
     assert "Status: invalid" in output
     assert "REPO_PILOT_CORS_ORIGINS cannot include * in hosted mode." in output
+
+
+def test_cli_worker_run_once_reports_no_queued_runs(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+
+    class FakeService:
+        def execute_next_queued(self):
+            return None
+
+    monkeypatch.setattr(cli, "_persistent_run_service", lambda: FakeService())
+
+    exit_code = cli.main(["worker", "run-once"])
+
+    assert exit_code == 0
+    assert "No queued runs." in capsys.readouterr().out
+
+
+def test_cli_worker_run_once_claims_one_run(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+
+    class FakeService:
+        def execute_next_queued(self):
+            return SimpleNamespace(
+                run_id="run-1",
+                lifecycle_status="completed",
+                publication_status="not_started",
+            )
+
+    monkeypatch.setattr(cli, "_persistent_run_service", lambda: FakeService())
+
+    exit_code = cli.main(["worker", "run-once", "--json"])
+
+    body = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert body == {
+        "executed": 1,
+        "runs": [
+            {
+                "run_id": "run-1",
+                "lifecycle_status": "completed",
+                "publication_status": "not_started",
+            }
+        ],
+    }
+
+
+def test_cli_worker_run_loop_respects_max_runs(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+    calls = {"count": 0}
+
+    class FakeService:
+        def execute_next_queued(self):
+            calls["count"] += 1
+            return SimpleNamespace(
+                run_id=f"run-{calls['count']}",
+                lifecycle_status="completed",
+                publication_status="not_started",
+            )
+
+    monkeypatch.setattr(cli, "_persistent_run_service", lambda: FakeService())
+
+    exit_code = cli.main(["worker", "run", "--max-runs", "2"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert calls["count"] == 2
+    assert "Executed run run-1: completed" in output
+    assert "Executed run run-2: completed" in output
 
 
 def test_cli_eval_workflow_prints_report(monkeypatch, capsys) -> None:
