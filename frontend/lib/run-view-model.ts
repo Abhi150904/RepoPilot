@@ -10,7 +10,6 @@ import {
   UserCheck
 } from "lucide-react";
 import type { RunStatusResponse } from "@/lib/api";
-import { diffLines as fallbackDiffLines, planSteps as fallbackPlanSteps } from "@/lib/sample-data";
 
 export type DiffLine = {
   kind: "add" | "remove" | "context";
@@ -113,6 +112,32 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     : changedFiles.length > 1
       ? `${changedFiles.length} files changed`
       : "No files changed";
+  const generatedTimeline: RunViewModel["timeline"] = [
+    stage("Issue analysis", Radar, result.analysis, "Intent and risk extracted", lifecycleStatus),
+    stage("Repository retrieval", Braces, result.repository_context, "Hybrid retrieval ranked targets", lifecycleStatus),
+    stage("Implementation plan", Play, result.plan, `${stepsFromPlan(plan).length} planned steps`, lifecycleStatus),
+    stage("Code generation", Code2, changedFiles.length ? result.code_changes ?? changedFiles : undefined, changedFileDetail, lifecycleStatus),
+    stage("Tests", TestTube2, result.test_analysis ?? result.test_result, testDetail(testsPassed), lifecycleStatus),
+    {
+      label: "Repair",
+      icon: TimerReset,
+      state: numberValue(result.repair_attempts) ? "complete" : "muted",
+      detail: numberValue(result.repair_attempts) ? `${numberValue(result.repair_attempts)} repair attempts` : "No repair needed"
+    },
+    stage("Automated review", ShieldCheck, result.review_result, reviewStatus === "blocked" ? "Review found blockers" : "Review complete", lifecycleStatus),
+    {
+      label: "Human approval",
+      icon: UserCheck,
+      state: approvalApproved ? "complete" : lifecycleStatus === "completed" ? "active" : "locked",
+      detail: approvalApproved ? "Approval bound" : lifecycleStatus === "completed" && review ? "Waiting for decision" : "Pending completed run"
+    },
+    {
+      label: "Publication",
+      icon: GitPullRequestArrow,
+      state: publishStatus ? "complete" : approvalApproved ? "active" : "locked",
+      detail: stringValue(publishResult?.summary) ?? "Locked until approval"
+    }
+  ];
 
   return {
     repository,
@@ -130,32 +155,7 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     summary: stringValue(summary.summary) ?? run?.response?.summary ?? failureSummary(run) ?? "RepoPilot is ready to inspect the next run.",
     nextAction: stringValue(summary.next_action) ?? "start_run",
     canReview: Boolean(review || approval || approvalBinding),
-    timeline: [
-      stage("Issue analysis", Radar, result.analysis, "Intent and risk extracted", lifecycleStatus),
-      stage("Repository retrieval", Braces, result.repository_context, "Hybrid retrieval ranked targets", lifecycleStatus),
-      stage("Implementation plan", Play, result.plan, `${stepsFromPlan(plan).length} planned steps`, lifecycleStatus),
-      stage("Code generation", Code2, changedFiles.length ? result.code_changes ?? changedFiles : undefined, changedFileDetail, lifecycleStatus),
-      stage("Tests", TestTube2, result.test_analysis ?? result.test_result, testDetail(testsPassed), lifecycleStatus),
-      {
-        label: "Repair",
-        icon: TimerReset,
-        state: numberValue(result.repair_attempts) ? "complete" : "muted",
-        detail: numberValue(result.repair_attempts) ? `${numberValue(result.repair_attempts)} repair attempts` : "No repair needed"
-      },
-      stage("Automated review", ShieldCheck, result.review_result, reviewStatus === "blocked" ? "Review found blockers" : "Review complete", lifecycleStatus),
-      {
-        label: "Human approval",
-        icon: UserCheck,
-        state: approvalApproved ? "complete" : lifecycleStatus === "completed" ? "active" : "locked",
-        detail: approvalApproved ? "Approval bound" : lifecycleStatus === "completed" && review ? "Waiting for decision" : "Pending completed run"
-      },
-      {
-        label: "Publication",
-        icon: GitPullRequestArrow,
-        state: publishStatus ? "complete" : approvalApproved ? "active" : "locked",
-        detail: stringValue(publishResult?.summary) ?? "Locked until approval"
-      }
-    ],
+    timeline: timelineFromEvents(run, generatedTimeline),
     planSteps: stepsFromPlan(plan, hasRun),
     diffLines: diffFromText(stringValue(result.diff), hasRun),
     diffFile: changedFiles[0] ?? (hasRun ? "No changed files" : "backend/app/services/run_service.py"),
@@ -170,11 +170,11 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     review: {
       blockers: reviewStatus === "blocked" || reviewStatus === "changes_requested" ? 1 : 0,
       notes: reviewStatus ? 2 : 0,
-      confidence: reviewStatus ? (reviewStatus === "approved" || reviewStatus === "ready" ? "96" : "84") : "n/a",
-      risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), hasRun ? "n/a" : "Moderate")
+      confidence: formatMetric(dict(summary.metrics)?.review_confidence ?? dict(result.run_metrics)?.review_confidence, "n/a"),
+      risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), "n/a")
     },
     repairAttempts: String(numberValue(result.repair_attempts) ?? numberValue(summary.repair_attempts) ?? 0),
-    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, hasRun ? "n/a" : "6.4k"),
+    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, "n/a"),
     verification: [
       { label: "Workspace verified", verified: dict(approvalBinding?.git_safety)?.status === "safe" || approvalBinding?.status === "bound" },
       { label: "Tests passed", verified: testsPassed === true },
@@ -184,12 +184,12 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     ],
     publish: {
       mode: stringValue(publishResult?.mode) ?? "",
-      branch: firstString(stringValue(publishResult?.branch_name), stringValue(publicationPackage?.branch_name), hasRun ? "Not prepared" : "repopilot/issue-42-publication-integrity"),
+      branch: firstString(stringValue(publishResult?.branch_name), stringValue(publicationPackage?.branch_name), "Not prepared"),
       repository,
-      title: firstString(stringValue(publicationPackage?.pr_title), hasRun ? "No pull request prepared" : "fix: harden publication lifecycle"),
+      title: firstString(stringValue(publicationPackage?.pr_title), "No pull request prepared"),
       status: stringValue(publishResult?.status) ?? (hasRun ? "Locked" : "Ready"),
       summary: stringValue(publishResult?.summary) ?? "Approve a completed run before publishing.",
-      prUrl: publishResult?.mode === "pr" && publishResult?.status === "published"
+      prUrl: publishResult?.status === "published"
         ? stringValue(publishResult?.pr_url)
         : undefined
     },
@@ -198,10 +198,131 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
       reason: stringValue(testAnalysis?.summary) ?? stringValue(llmError?.message) ?? "Expected push stage to resume after existing commit.",
       repair: stringValue(dict(result.repair_decision)?.summary) ?? (hasRun ? "No automated repair was available for this stop." : "RepoPilot identified the failure as repairable."),
       attempt: `${numberValue(result.repair_attempts) ?? 0} / ${numberValue(run?.request.max_repair_attempts) ?? 2}`,
-      passed: testsPassed === false ? 17 : 26,
-      failed: testsPassed === false ? 2 : 0
+      passed: numberValue(dict(result.test_result)?.passed) ?? 0,
+      failed: numberValue(dict(result.test_result)?.failed) ?? 0
     }
   };
+}
+
+function timelineFromEvents(
+  run: RunStatusResponse | null,
+  fallback: RunViewModel["timeline"]
+): RunViewModel["timeline"] {
+  if (!run?.events?.length) {
+    return fallback;
+  }
+  return run.events.map((event, index) => eventTimelineItem(event, run, index));
+}
+
+function eventTimelineItem(
+  event: NonNullable<RunStatusResponse["events"]>[number],
+  run: RunStatusResponse,
+  index: number
+): RunViewModel["timeline"][number] {
+  const metadata = dict(event.metadata) ?? {};
+  const mode = stringValue(metadata.mode);
+  const status = stringValue(metadata.status);
+  const prUrl = stringValue(metadata.pr_url);
+  const isLatest = index === (run.events?.length ?? 0) - 1;
+  const active =
+    isLatest &&
+    (run.lifecycle_status === "queued" ||
+      run.lifecycle_status === "running" ||
+      run.publication_status === "publishing");
+
+  switch (event.event_type) {
+    case "run.created":
+      return eventItem("Run created", Radar, active ? "active" : "complete", detailFromMetadata(metadata, "Request accepted"));
+    case "run.queued":
+      return eventItem("Queued", TimerReset, active ? "active" : "complete", "Waiting for an execution worker");
+    case "run.claimed":
+      return eventItem("Worker claimed run", Play, active ? "active" : "complete", "Execution slot assigned");
+    case "run.started":
+      return eventItem("Execution started", Play, active ? "active" : "complete", "Workflow is running");
+    case "run.completed":
+      return eventItem("Run completed", ShieldCheck, "complete", "Artifacts were saved");
+    case "run.failed":
+      return eventItem("Run failed", ShieldCheck, "active", detailFromMetadata(metadata, "Workflow stopped before completion"));
+    case "run.interrupted":
+      return eventItem("Run interrupted", TimerReset, "active", "Backend restarted before completion");
+    case "run.updated":
+      return eventItem("Run updated", UserCheck, "complete", "Review state was saved");
+    case "run.stage.analysis":
+      return eventItem("Issue analysis", Radar, "complete", stageDetail(metadata, "Intent and risk extracted"));
+    case "run.stage.retrieval":
+      return eventItem("Repository retrieval", Braces, "complete", stageDetail(metadata, "Repository context collected"));
+    case "run.stage.planning":
+      return eventItem("Implementation plan", Play, "complete", stageDetail(metadata, "Plan produced"));
+    case "run.stage.code":
+      return eventItem("Code generation", Code2, "complete", stageDetail(metadata, "Code changes proposed"));
+    case "run.stage.tests":
+      return eventItem("Tests", TestTube2, "complete", stageDetail(metadata, "Test result recorded"));
+    case "run.stage.repair":
+      return eventItem("Repair", TimerReset, "complete", stageDetail(metadata, "Repair decision recorded"));
+    case "run.stage.review":
+      return eventItem("Automated review", ShieldCheck, "complete", stageDetail(metadata, "Review result recorded"));
+    case "run.stage.approval":
+      return eventItem("Approval", UserCheck, "complete", stageDetail(metadata, "Approval state recorded"));
+    case "run.stage.publication":
+      return eventItem("Publication", GitPullRequestArrow, "complete", stageDetail(metadata, "Publication package prepared"));
+    case "run.publication_started":
+      return eventItem("Publication started", GitPullRequestArrow, active ? "active" : "complete", mode ? `Mode: ${modeLabel(mode)}` : "Publishing");
+    case "run.publication_ready":
+      return eventItem("Publication ready", GitPullRequestArrow, "complete", status ? `Status: ${status}` : "Publication checks completed");
+    case "run.publication_published":
+      return eventItem("Published", GitPullRequestArrow, "complete", prUrl ?? "Publication finished");
+    case "run.publication_failed":
+      return eventItem("Publication failed", GitPullRequestArrow, "active", mode ? `Mode: ${modeLabel(mode)}` : "Publication needs attention");
+    default:
+      return eventItem(titleFromEvent(event.event_type), Radar, active ? "active" : "complete", detailFromMetadata(metadata, "Recorded by RepoPilot"));
+  }
+}
+
+function stageDetail(metadata: Record<string, unknown>, fallback: string): string {
+  const duration = numberValue(metadata.duration_ms);
+  if (duration !== undefined) {
+    return `${Math.round(duration)}ms`;
+  }
+  return fallback;
+}
+
+function eventItem(
+  label: string,
+  icon: typeof Radar,
+  state: TimelineState,
+  detail: string
+): RunViewModel["timeline"][number] {
+  return { label, icon, state, detail };
+}
+
+function titleFromEvent(eventType: string): string {
+  return eventType
+    .replace(/^run\./, "")
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function detailFromMetadata(metadata: Record<string, unknown>, fallback: string): string {
+  const errorCode = stringValue(metadata.error_code);
+  if (errorCode) {
+    return errorCode;
+  }
+  const requestId = stringValue(metadata.request_id);
+  if (requestId) {
+    return `Request ${requestId.slice(0, 8)}`;
+  }
+  return fallback;
+}
+
+function modeLabel(mode: string): string {
+  if (mode === "dry_run") {
+    return "Dry run";
+  }
+  if (mode === "pr") {
+    return "Pull request";
+  }
+  return mode.charAt(0).toUpperCase() + mode.slice(1);
 }
 
 function headlineFor({
@@ -270,7 +391,7 @@ function stepsFromPlan(plan: Record<string, unknown> | null, hasRun = false): st
   if (hasRun) {
     return ["No implementation plan was produced for this run."];
   }
-  return fallbackPlanSteps;
+  return ["No implementation plan has been produced yet."];
 }
 
 function failureSummary(run: RunStatusResponse | null): string | undefined {
@@ -295,7 +416,7 @@ function diffFromText(diff?: string, hasRun = false): DiffLine[] {
     if (hasRun) {
       return [{ kind: "context", text: "No diff was generated for this run." }];
     }
-    return fallbackDiffLines as DiffLine[];
+    return [{ kind: "context", text: "No diff is available yet." }];
   }
   return diff
     .split("\n")

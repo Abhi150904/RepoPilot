@@ -4,13 +4,22 @@ import argparse
 import json
 import shlex
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
 from pydantic import ValidationError
 
+from app.api.runs import RunStore
 from app.api.schemas import PublishRequest, RunRequest, RunStatusResponse
-from app.core.config import deployment_issues, deployment_warnings, get_settings
+from app.auth.github_app import GitHubAppService
+from app.core.audit import AuditLogger
+from app.core.config import (
+    deployment_issues,
+    deployment_warnings,
+    get_settings,
+    inline_run_execution_enabled,
+)
 from app.evals import retrieval as retrieval_eval
 from app.evals import runner as eval_runner
 from app.services.run_service import RepoPilotRunService, RunServiceError
@@ -30,6 +39,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if report["valid"] else 1
     if args.command == "eval":
         return _run_eval_command(args)
+    if args.command == "worker":
+        return _run_worker_command(args)
 
     try:
         request = RunRequest.model_validate(_workflow_input(args))
@@ -122,10 +133,45 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print eval results as JSON.",
     )
+    worker_parser = subparsers.add_parser(
+        "worker",
+        help="Run queued RepoPilot work from durable storage.",
+    )
+    worker_subparsers = worker_parser.add_subparsers(dest="worker_command", required=True)
+    worker_once_parser = worker_subparsers.add_parser(
+        "run-once",
+        help="Claim and execute one queued run, then exit.",
+    )
+    worker_once_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print worker result as JSON.",
+    )
+    worker_run_parser = worker_subparsers.add_parser(
+        "run",
+        help="Continuously claim and execute queued runs.",
+    )
+    worker_run_parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=5.0,
+        help="Seconds to wait between empty queue polls.",
+    )
+    worker_run_parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=None,
+        help="Optional limit for controlled worker runs.",
+    )
+    worker_run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print worker result as JSON when the loop exits.",
+    )
     _add_run_arguments(parser)
 
     args = parser.parse_args(argv)
-    if args.command not in (None, "run", "config", "eval"):
+    if args.command not in (None, "run", "config", "eval", "worker"):
         parser.error(f"Unknown command: {args.command}")
     return args
 
@@ -313,6 +359,103 @@ def _publish_request_mode(mode: str) -> str:
     return "dry_run" if mode == "dry-run" else mode
 
 
+def _run_worker_command(args: argparse.Namespace) -> int:
+    if args.worker_command == "run-once":
+        worker = _persistent_run_service()
+        worker.recover_stale_runs()
+        executed = _worker_run_once(worker)
+        _print_worker_result(executed=executed, json_output=args.json)
+        return 0
+    if args.worker_command == "run":
+        worker = _persistent_run_service()
+        worker.recover_stale_runs()
+        executed = _worker_loop(
+            poll_interval=args.poll_interval,
+            max_runs=args.max_runs,
+            service=worker,
+        )
+        _print_worker_result(executed=executed, json_output=args.json)
+        return 0
+    raise SystemExit(f"Unknown worker command: {args.worker_command}")
+
+
+def _worker_run_once(service: RepoPilotRunService | None = None) -> RunStatusResponse | None:
+    worker = service or _persistent_run_service()
+    return worker.execute_next_queued()
+
+
+def _worker_loop(
+    *,
+    poll_interval: float,
+    max_runs: int | None,
+    service: RepoPilotRunService | None = None,
+) -> list[RunStatusResponse]:
+    if poll_interval < 0:
+        raise SystemExit("--poll-interval cannot be negative.")
+    if max_runs is not None and max_runs < 1:
+        raise SystemExit("--max-runs must be at least 1.")
+
+    worker = service or _persistent_run_service()
+    executed: list[RunStatusResponse] = []
+    try:
+        while max_runs is None or len(executed) < max_runs:
+            run = worker.execute_next_queued()
+            if run is None:
+                if max_runs is not None:
+                    break
+                time.sleep(poll_interval)
+                continue
+            executed.append(run)
+    except KeyboardInterrupt:
+        pass
+    return executed
+
+
+def _persistent_run_service() -> RepoPilotRunService:
+    settings = get_settings()
+    github_app = GitHubAppService(settings)
+    return RepoPilotRunService(
+        run_store=RunStore(database_url=settings.database_url),
+        audit_logger=AuditLogger(database_url=settings.database_url),
+        installation_token_resolver=lambda owner: (
+            github_app.installation_access_token(installation_id=owner.installation_id)
+            if owner.installation_id is not None
+            else None
+        ),
+    )
+
+
+def _print_worker_result(
+    *,
+    executed: RunStatusResponse | list[RunStatusResponse] | None,
+    json_output: bool,
+) -> None:
+    runs = executed if isinstance(executed, list) else ([executed] if executed is not None else [])
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "executed": len(runs),
+                    "runs": [
+                        {
+                            "run_id": run.run_id,
+                            "lifecycle_status": run.lifecycle_status,
+                            "publication_status": run.publication_status,
+                        }
+                        for run in runs
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+    if not runs:
+        print("No queued runs.")
+        return
+    for run in runs:
+        print(f"Executed run {run.run_id}: {run.lifecycle_status}")
+
+
 def _run_eval_command(args: argparse.Namespace) -> int:
     if args.eval_suite == "retrieval":
         benchmark = retrieval_eval.load_retrieval_benchmark(Path(args.benchmark))
@@ -368,6 +511,8 @@ def _config_report() -> dict[str, Any]:
     gemini_configured = bool(getattr(settings, "gemini_api_key", None))
     groq_configured = bool(getattr(settings, "groq_api_key", None))
     github_configured = bool(settings.github_token)
+    database_configured = bool(getattr(settings, "database_url", None))
+    inline_run_execution = inline_run_execution_enabled(settings)
     issues = []
     if gemini_required and not gemini_configured:
         issues.append("GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini.")
@@ -399,6 +544,20 @@ def _config_report() -> dict[str, Any]:
             "configured": github_configured,
             "status": "configured" if github_configured else "missing",
         },
+        "database": {
+            "required": settings.hosted_mode,
+            "configured": database_configured,
+            "status": "configured" if database_configured else "missing",
+        },
+        "worker": {
+            "required": settings.hosted_mode,
+            "command": "repopilot worker run",
+            "queue_configured": database_configured if settings.hosted_mode else True,
+        },
+        "inline_run_execution": {
+            "enabled": inline_run_execution,
+            "source": "explicit" if getattr(settings, "inline_run_execution", None) is not None else "default",
+        },
         "workspace_root": settings.workspace_root,
         "default_test_command": settings.default_test_command,
         "cli_install": {
@@ -412,6 +571,9 @@ def _print_config_report(report: dict[str, Any]) -> None:
     gemini = _dict_or_none(report.get("gemini_api_key")) or {}
     groq = _dict_or_none(report.get("groq_api_key")) or {}
     github = _dict_or_none(report.get("github_token")) or {}
+    database = _dict_or_none(report.get("database")) or {}
+    worker = _dict_or_none(report.get("worker")) or {}
+    inline_execution = _dict_or_none(report.get("inline_run_execution")) or {}
     cli_install = _dict_or_none(report.get("cli_install")) or {}
 
     print("RepoPilot config")
@@ -426,6 +588,10 @@ def _print_config_report(report: dict[str, Any]) -> None:
     print(f"Gemini API key: {gemini.get('status', 'unknown')}")
     print(f"Groq API key: {groq.get('status', 'unknown')}")
     print(f"GitHub token: {github.get('status', 'unknown')}")
+    print(f"Database: {database.get('status', 'unknown')}")
+    print(f"Inline run execution: {'enabled' if inline_execution.get('enabled') else 'disabled'}")
+    if worker.get("required"):
+        print(f"Worker command: {worker.get('command', 'unknown')}")
     print(f"Workspace root: {report['workspace_root']}")
     print(f"Default test command: {report['default_test_command']}")
     cli_status = "available" if cli_install.get("available") else "missing"

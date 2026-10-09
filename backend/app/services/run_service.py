@@ -4,14 +4,15 @@ import hashlib
 import logging
 from pathlib import Path
 import subprocess
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, Callable
+from uuid import uuid4
 
 from app.agents.approval import ApprovalGate
 from app.agents.publication import PublicationPreparer
 from app.agents.publisher import PublishExecutor
 from app.agents.run_summarizer import RunSummarizer
-from app.api.runs import RunStore
+from app.api.runs import IdempotencyConflict, RunStore
 from app.api.schemas import (
     ApprovalRequest,
     MetricsResponse,
@@ -56,12 +57,18 @@ class RepoPilotRunService:
         run_store: RunStore | None = None,
         audit_logger: AuditLogger | None = None,
         installation_token_resolver: Callable[[RunOwner], str | None] | None = None,
+        lease_seconds: int = 1800,
+        heartbeat_interval_seconds: float = 60.0,
     ) -> None:
         self.run_store = run_store or RunStore()
         self.audit_logger = audit_logger or AuditLogger()
         self._installation_token_resolver = installation_token_resolver
+        self._worker_id = uuid4().hex
+        self._lease_seconds = lease_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._request_ids: dict[str, str] = {}
         self._owners: dict[str, RunOwner] = {}
+        self._execution_pending: set[str] = set()
         self._transition_lock = Lock()
 
     def create_run(
@@ -70,8 +77,24 @@ class RepoPilotRunService:
         *,
         request_id: str | None = None,
         owner: RunOwner | None = None,
+        idempotency_key: str | None = None,
     ) -> RunStatusResponse:
-        run = self.run_store.create(_workflow_input(request))
+        try:
+            created = self.run_store.create_result(
+                _workflow_input(request),
+                request_id=request_id,
+                owner=owner,
+                idempotency_key=idempotency_key,
+            )
+            run = created.run
+        except IdempotencyConflict as exc:
+            raise RunServiceError(
+                status_code=409,
+                code="idempotency_conflict",
+                message="Idempotency-Key was reused with a different run payload.",
+            ) from exc
+        if created.created:
+            self._execution_pending.add(run.run_id)
         if request_id:
             self._request_ids[run.run_id] = request_id
         if owner:
@@ -87,17 +110,51 @@ class RepoPilotRunService:
         )
         return run
 
+    def consume_execution_pending(self, run_id: str) -> bool:
+        if run_id not in self._execution_pending:
+            return False
+        self._execution_pending.remove(run_id)
+        return True
+
     def execute_run(self, run_id: str) -> None:
         run = self.run_store.get(run_id)
         if run is None:
             return
-        request_id = self._request_ids.get(run_id)
-        self.run_store.mark_running(run_id)
+        if run.lifecycle_status == "queued":
+            self.run_store.mark_running(
+                run_id,
+                worker_id=self._worker_id,
+                lease_seconds=self._lease_seconds,
+            )
+            run = self.run_store.get(run_id)
+            if run is None:
+                return
+        if run.lifecycle_status != "running":
+            return
+        self._execute_claimed_run(run)
+
+    def execute_next_queued(self) -> RunStatusResponse | None:
+        run = self.run_store.claim_next_queued(
+            worker_id=self._worker_id,
+            lease_seconds=self._lease_seconds,
+        )
+        if run is None:
+            return None
+        self._execute_claimed_run(run)
+        return self.run_store.get(run.run_id)
+
+    def recover_stale_runs(self) -> int:
+        return self.run_store.recover_stale_running_runs()
+
+    def _execute_claimed_run(self, run: RunStatusResponse) -> None:
+        run_id = run.run_id
+        request_id = self._request_ids.get(run_id) or self.run_store.get_request_id(run_id)
         self.audit_logger.record(
             RUN_STARTED,
             run_id=run_id,
             metadata=_trace_metadata(run_id=run_id, request_id=request_id),
         )
+        stop_heartbeat = self._start_lease_heartbeat(run_id)
         try:
             result = build_workflow().invoke(
                 _workflow_runtime_input(
@@ -135,6 +192,37 @@ class RepoPilotRunService:
                     "error_code": _audit_error_code(exc),
                 },
             )
+        finally:
+            stop_heartbeat()
+
+    def _start_lease_heartbeat(self, run_id: str) -> Callable[[], None]:
+        interval = self._heartbeat_interval_seconds
+        if interval <= 0:
+            return lambda: None
+        stop = Event()
+
+        def beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    renewed = self.run_store.renew_run_lease(
+                        run_id,
+                        worker_id=self._worker_id,
+                        lease_seconds=self._lease_seconds,
+                    )
+                except Exception:
+                    logger.exception("RepoPilot run lease heartbeat failed: run_id=%s", run_id)
+                    continue
+                if not renewed:
+                    return
+
+        thread = Thread(target=beat, name=f"repopilot-heartbeat-{run_id[:8]}", daemon=True)
+        thread.start()
+
+        def stop_thread() -> None:
+            stop.set()
+            thread.join(timeout=1)
+
+        return stop_thread
 
     def get_run(self, run_id: str) -> RunStatusResponse:
         run = self.run_store.get(run_id)
@@ -142,12 +230,15 @@ class RepoPilotRunService:
             raise RunServiceError(status_code=404, code="run_not_found", message="Run not found.")
         return run
 
+    def list_runs(self, *, owner: RunOwner | None = None, limit: int = 50) -> list[RunStatusResponse]:
+        return self.run_store.list(owner=owner, limit=limit)
+
     def get_result(self, run_id: str) -> RunResponse:
         return self._completed_response(run_id)
 
     def get_owner(self, run_id: str) -> RunOwner | None:
         self.get_run(run_id)
-        return self._owners.get(run_id)
+        return self._owners.get(run_id) or self.run_store.get_owner(run_id)
 
     def approve_run(
         self,
@@ -173,7 +264,7 @@ class RepoPilotRunService:
                 actor=actor,
                 actor_context=actor_context,
                 metadata={
-                    **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
+                    **_trace_metadata(run_id=run_id, request_id=self._request_id_for_run(run_id)),
                     "has_note": bool(request and request.note),
                 },
             )
@@ -214,7 +305,7 @@ class RepoPilotRunService:
                 actor=actor,
                 actor_context=actor_context,
                 metadata={
-                    **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
+                    **_trace_metadata(run_id=run_id, request_id=self._request_id_for_run(run_id)),
                     "has_reason": bool(request and request.reason),
                 },
             )
@@ -239,24 +330,50 @@ class RepoPilotRunService:
                 )
             _validate_approval_binding(result)
             package = _publication_package(result, approval)
-            publish_result = _publish(
-                package=package,
-                result=result,
-                mode=request.mode,
-                previous=_publish_result(result),
-                github_token=self._github_token_for_run(run_id),
+            self.run_store.mark_publication_status(
+                run_id,
+                "publishing",
+                event_type="run.publication_started",
+                event_metadata={"mode": request.mode},
             )
+            try:
+                publish_result = _publish(
+                    package=package,
+                    result=result,
+                    mode=request.mode,
+                    previous=_publish_result(result),
+                    github_token=self._github_token_for_run(run_id),
+                )
+            except Exception:
+                self.run_store.mark_publication_status(
+                    run_id,
+                    "failed",
+                    event_type="run.publication_failed",
+                    event_metadata={"mode": request.mode},
+                )
+                raise
             result["publication_package"] = package.model_dump()
             result["publish_result"] = publish_result.model_dump()
             result["run_summary"] = RunSummarizer().summarize(result).model_dump()
             updated = self.run_store.update_response(run_id, _run_response(result))
+            updated = self.run_store.mark_publication_status(
+                run_id,
+                updated.publication_status,
+                event_type=_publication_event_type(updated.publication_status),
+                event_metadata={
+                    "mode": request.mode,
+                    "status": publish_result.status,
+                    "branch_name": publish_result.branch_name,
+                    "pr_url": publish_result.pr_url,
+                },
+            )
             self.audit_logger.record(
                 RUN_PUBLISHED,
                 run_id=run_id,
                 actor=actor,
                 actor_context=actor_context,
                 metadata={
-                    **_trace_metadata(run_id=run_id, request_id=self._request_ids.get(run_id)),
+                    **_trace_metadata(run_id=run_id, request_id=self._request_id_for_run(run_id)),
                     "mode": request.mode,
                     "status": publish_result.status,
                     "branch_name": publish_result.branch_name,
@@ -285,10 +402,13 @@ class RepoPilotRunService:
         return run.response
 
     def _github_token_for_run(self, run_id: str) -> str | None:
-        owner = self._owners.get(run_id)
+        owner = self._owners.get(run_id) or self.run_store.get_owner(run_id)
         if owner is None or self._installation_token_resolver is None:
             return None
         return self._installation_token_resolver(owner)
+
+    def _request_id_for_run(self, run_id: str) -> str | None:
+        return self._request_ids.get(run_id) or self.run_store.get_request_id(run_id)
 
 
 def _workflow_input(request: RunRequest) -> dict[str, Any]:
@@ -671,3 +791,13 @@ def _audit_error_code(exc: Exception) -> str:
     if "provider" in name or "llm" in name:
         return "provider_error"
     return "internal_error"
+
+
+def _publication_event_type(status: str) -> str:
+    if status == "published":
+        return "run.publication_published"
+    if status == "failed":
+        return "run.publication_failed"
+    if status == "ready":
+        return "run.publication_ready"
+    return "run.publication_updated"

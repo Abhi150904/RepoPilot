@@ -194,6 +194,23 @@ class Settings(BaseSettings):
             "REPOPILOT_PUBLIC_BASE_URL",
         ),
     )
+    database_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_DATABASE_URL",
+            "REPOPILOT_DATABASE_URL",
+            "DATABASE_URL",
+        ),
+    )
+    inline_run_execution: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REPO_PILOT_INLINE_RUN_EXECUTION",
+            "REPOPILOT_INLINE_RUN_EXECUTION",
+            "REPO_PILOT_INLINE_WORKER",
+            "REPOPILOT_INLINE_WORKER",
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -217,6 +234,12 @@ def deployment_warnings(settings: Settings) -> list[str]:
         warnings.append("Hosted mode should configure GitHub OAuth client credentials.")
     if settings.hosted_mode and not (settings.github_app_id and settings.github_app_private_key):
         warnings.append("Hosted mode should configure GitHub App credentials.")
+    if settings.hosted_mode and settings.database_url:
+        warnings.append(
+            "Hosted mode requires a separate worker process for queued runs: repopilot worker run."
+        )
+    if settings.hosted_mode and inline_run_execution_enabled(settings):
+        warnings.append("Inline run execution is enabled in hosted mode; use a worker process instead.")
     if "*" in _cors_origins(settings.cors_origins):
         warnings.append("Wildcard CORS origins are not recommended outside local development.")
     return warnings
@@ -232,14 +255,19 @@ def deployment_issues(settings: Settings) -> list[str]:
         issues.append("GitHub OAuth client credentials are required in hosted mode.")
     if settings.hosted_mode and not (settings.github_app_id and settings.github_app_private_key):
         issues.append("GitHub App credentials are required in hosted mode.")
+    if settings.hosted_mode and not settings.database_url:
+        issues.append("REPOPILOT_DATABASE_URL is required in hosted mode for durable runs.")
     return issues
 
 
 def readiness_report(settings: Settings) -> dict[str, object]:
+    database_configured = bool(settings.database_url) if settings.hosted_mode else True
     checks = {
         "cors_configured": bool(_cors_origins(settings.cors_origins)),
         "llm_provider_configured": bool(settings.llm_provider),
         "workspace_root_configured": bool(settings.workspace_root),
+        "database_configured": database_configured,
+        "worker_queue_configured": database_configured,
     }
     warnings = deployment_warnings(settings)
     issues = deployment_issues(settings)
@@ -252,6 +280,13 @@ def readiness_report(settings: Settings) -> dict[str, object]:
         "checks": checks,
         "warnings": warnings,
     }
+
+
+def inline_run_execution_enabled(settings: Settings) -> bool:
+    inline_setting = getattr(settings, "inline_run_execution", None)
+    if inline_setting is not None:
+        return bool(inline_setting)
+    return not settings.hosted_mode
 
 
 def _cors_origins(value: str) -> list[str]:

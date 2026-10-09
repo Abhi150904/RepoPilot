@@ -79,6 +79,7 @@ def clone_repository(
                 path=paths.repository_dir,
                 token=auth_token,
             )
+            _fetch_origin(path=paths.repository_dir, token=auth_token)
             return CloneResult(
                 repo=repo,
                 path=paths.repository_dir,
@@ -103,7 +104,7 @@ def create_run_worktree(
     *,
     repo: str,
     branch_name: str,
-    base_ref: str = "HEAD",
+    base_ref: str | None = None,
     settings: Settings | None = None,
     token: str | None = None,
 ) -> RunWorkspace:
@@ -117,19 +118,20 @@ def create_run_worktree(
     if _branch_exists(clone.path, safe_branch):
         raise WorkspaceError(f"Branch already exists in workspace repository: {safe_branch}")
 
+    resolved_base_ref = base_ref or _default_remote_base_ref(clone.path)
     paths.runs_dir.mkdir(parents=True, exist_ok=True)
     _run_git_worktree_add(
         source=clone.path,
         target=worktree_path,
         branch_name=safe_branch,
-        base_ref=base_ref,
+        base_ref=resolved_base_ref,
     )
     return RunWorkspace(
         repo=repo,
         source_path=clone.path,
         path=worktree_path,
         branch_name=safe_branch,
-        base_ref=base_ref,
+        base_ref=resolved_base_ref,
     )
 
 
@@ -220,6 +222,48 @@ def _run_git_clone(clone_url: str, target: Path, token: str | None) -> None:
 def _branch_exists(source: Path, branch_name: str) -> bool:
     result = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=source,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _fetch_origin(path: Path, token: str | None) -> None:
+    result = subprocess.run(
+        ["git", *_git_auth_args(token), "fetch", "--prune", "origin"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise WorkspaceError(
+            "Git fetch failed: "
+            f"{_redact_token(result.stderr.strip() or result.stdout.strip(), token)}"
+        )
+
+
+def _default_remote_base_ref(source: Path) -> str:
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=source,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    for candidate in ("origin/main", "origin/master"):
+        if _remote_branch_exists(source, candidate):
+            return candidate
+    return "HEAD"
+
+
+def _remote_branch_exists(source: Path, branch_name: str) -> bool:
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/{branch_name}"],
         cwd=source,
         capture_output=True,
         text=True,

@@ -81,6 +81,7 @@ def run_tests_locally(
         completed = subprocess.run(
             _resolve_command(command),
             cwd=workspace,
+            env=_test_environment(),
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -196,6 +197,7 @@ def _prepare_local_dependencies(
         completed = subprocess.run(
             _resolve_command(command),
             cwd=workspace,
+            env=_test_environment(),
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -238,6 +240,13 @@ def _resolve_command(command: list[str]) -> list[str]:
         if executable.lower() == "npm" and npm_cmd.exists():
             return [str(npm_cmd), *command[1:]]
     return command
+
+
+def _test_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("CI", "true")
+    env.setdefault("NO_COLOR", "1")
+    return env
 
 
 def _command_not_found_result(command: list[str]) -> TestResult:

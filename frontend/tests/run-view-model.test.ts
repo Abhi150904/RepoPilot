@@ -58,7 +58,7 @@ describe("buildRunView", () => {
     expect(view.planSteps).toEqual(["Add validation", "Add regression test"]);
     expect(view.diffStats).toBe("+1 -1");
     expect(view.tests.label).toBe("passed");
-    expect(view.review.confidence).toBe("96");
+    expect(view.review.confidence).toBe("n/a");
     expect(view.tokens).toBe("6.4k");
     expect(view.verification.every((item) => item.verified)).toBe(true);
     expect(view.publish.prUrl).toBe("https://github.com/example/demo/pull/1");
@@ -180,5 +180,100 @@ describe("buildRunView", () => {
     expect(view.publish.mode).toBe("dry_run");
     expect(view.publish.status).toBe("ready");
     expect(view.publish.prUrl).toBeUndefined();
+  });
+
+  it("uses durable run events for the execution timeline", () => {
+    const run: RunStatusResponse = {
+      run_id: "run-5",
+      lifecycle_status: "completed",
+      publication_status: "ready",
+      request: { repository: "example/demo", issue_number: 11 },
+      events: [
+        {
+          run_id: "run-5",
+          event_type: "run.created",
+          created_at: "2026-10-08T00:00:00Z",
+          metadata: { request_id: "abcdef123456" }
+        },
+        {
+          run_id: "run-5",
+          event_type: "run.queued",
+          created_at: "2026-10-08T00:00:01Z",
+          metadata: {}
+        },
+        {
+          run_id: "run-5",
+          event_type: "run.claimed",
+          created_at: "2026-10-08T00:00:02Z",
+          metadata: {}
+        },
+        {
+          run_id: "run-5",
+          event_type: "run.started",
+          created_at: "2026-10-08T00:00:03Z",
+          metadata: {}
+        },
+        {
+          run_id: "run-5",
+          event_type: "run.completed",
+          created_at: "2026-10-08T00:00:04Z",
+          metadata: {}
+        },
+        {
+          run_id: "run-5",
+          event_type: "run.publication_started",
+          created_at: "2026-10-08T00:00:05Z",
+          metadata: { mode: "dry_run" }
+        },
+        {
+          run_id: "run-5",
+          event_type: "run.publication_ready",
+          created_at: "2026-10-08T00:00:06Z",
+          metadata: { mode: "dry_run", status: "ready" }
+        }
+      ],
+      error: null,
+      response: {
+        status: "approved",
+        next_action: "human_review",
+        summary: "Approved.",
+        run_summary: {
+          status: "approved",
+          summary: "Approved.",
+          next_action: "human_review",
+          tests_passed: true,
+          repair_attempts: 0
+        },
+        result: {
+          repository: "example/demo",
+          issue_number: 11,
+          issue: "Fix timeline",
+          modified_files: ["src/app.ts"],
+          review_result: { status: "approved" },
+          approval_decision: { approved: true },
+          approval_binding: { status: "bound", head_commit: "abc123", git_safety: { status: "safe" } },
+          publish_result: {
+            mode: "dry_run",
+            status: "ready",
+            summary: "Publication dry run passed."
+          }
+        }
+      }
+    };
+
+    const view = buildRunView(run);
+
+    expect(view.timeline.map((item) => item.label)).toEqual([
+      "Run created",
+      "Queued",
+      "Worker claimed run",
+      "Execution started",
+      "Run completed",
+      "Publication started",
+      "Publication ready"
+    ]);
+    expect(view.timeline[0].detail).toBe("Request abcdef12");
+    expect(view.timeline[5].detail).toBe("Mode: Dry run");
+    expect(view.timeline.every((item) => item.state === "complete")).toBe(true);
   });
 });

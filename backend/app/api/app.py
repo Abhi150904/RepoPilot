@@ -32,7 +32,9 @@ from app.api.schemas import (
     RunResponse,
     RunStatusResponse,
 )
-from app.core.config import Settings, get_settings, readiness_report
+from app.core.config import Settings, get_settings, inline_run_execution_enabled, readiness_report
+from app.core.audit import AuditLogger
+from app.api.runs import RunStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
 
 
@@ -56,6 +58,8 @@ def create_app(
     oauth = oauth_client or GitHubOAuthClient(config)
     github_app = github_app_service or GitHubAppService(config)
     run_service = service or RepoPilotRunService(
+        run_store=RunStore(database_url=config.database_url),
+        audit_logger=AuditLogger(database_url=config.database_url),
         installation_token_resolver=lambda owner: (
             github_app.installation_access_token(installation_id=owner.installation_id)
             if owner.installation_id is not None
@@ -282,9 +286,16 @@ def create_app(
             _hosted_initial_request(config=config, request=request),
             request_id=_request_id(http_request),
             owner=owner,
+            idempotency_key=http_request.headers.get("Idempotency-Key"),
         )
-        background_tasks.add_task(run_service.execute_run, run.run_id)
+        if inline_run_execution_enabled(config) and run_service.consume_execution_pending(run.run_id):
+            background_tasks.add_task(run_service.execute_next_queued)
         return run
+
+    @api.get("/runs", response_model=list[RunStatusResponse])
+    def list_runs(request: Request) -> list[RunStatusResponse]:
+        owner = _owner_filter_for_run_list(config=config, request=request, sessions=sessions)
+        return run_service.list_runs(owner=owner)
 
     @api.get(
         "/runs/{run_id}",
@@ -481,6 +492,23 @@ def _authorize_run_access(
             detail={"code": "run_not_found", "message": "Run not found."},
         )
     return owner
+
+
+def _owner_filter_for_run_list(
+    *,
+    config: Settings,
+    request: Request,
+    sessions: InMemorySessionStore,
+) -> RunOwner | None:
+    if not config.hosted_mode:
+        return None
+    session = _require_session(request, sessions, config)
+    if session is None:
+        raise PermissionError("Authentication is required.")
+    return RunOwner(
+        github_user_id=session.user.github_user_id,
+        github_login=session.user.login,
+    )
 
 
 def _auth_me_response(session: AuthSession) -> AuthMeResponse:
