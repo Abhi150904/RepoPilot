@@ -291,8 +291,20 @@ class RunStore:
                 for record in sorted(records, key=lambda record: record.updated_at, reverse=True)[:limit]
             ]
 
-    def mark_running(self, run_id: str) -> None:
-        self._update(run_id=run_id, lifecycle_status="running", event_type="run.started")
+    def mark_running(
+        self,
+        run_id: str,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = 1800,
+    ) -> None:
+        self._update(
+            run_id=run_id,
+            lifecycle_status="running",
+            event_type="run.started",
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
 
     def mark_completed(self, run_id: str, response: RunResponse) -> None:
         self._update(
@@ -446,6 +458,32 @@ class RunStore:
             record.events.append(_event(record.run_id, "run.started", now, {}))
             return record.to_response()
 
+    def renew_run_lease(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 1800,
+    ) -> bool:
+        """Extend a running lease only when the caller still owns the run."""
+        now = _now()
+        if self._session_factory:
+            with self._session_factory() as session:
+                row = session.get(RunRow, run_id)
+                if row is None or row.lifecycle_status != "running" or row.worker_id != worker_id:
+                    return False
+                row.last_heartbeat_at = now
+                row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+                row.updated_at = now
+                session.commit()
+                return True
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.lifecycle_status != "running":
+                return False
+            record.updated_at = now
+            return True
+
     def close(self) -> None:
         if self._engine:
             self._engine.dispose()
@@ -494,6 +532,8 @@ class RunStore:
         event_metadata: dict[str, Any] | None = None,
         pre_events: list[tuple[str, dict[str, Any]]] | None = None,
         publish_result: dict[str, Any] | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = 1800,
     ) -> None:
         now = _now()
         if self._session_factory:
@@ -504,6 +544,10 @@ class RunStore:
                 row.lifecycle_status = lifecycle_status
                 row.publication_status = publication_status or row.publication_status
                 row.updated_at = now
+                if lifecycle_status == "running":
+                    row.worker_id = worker_id or row.worker_id
+                    row.last_heartbeat_at = now
+                    row.lease_expires_at = now + timedelta(seconds=lease_seconds)
                 if lifecycle_status in ("completed", "failed", "interrupted"):
                     row.worker_id = None
                     row.lease_expires_at = None

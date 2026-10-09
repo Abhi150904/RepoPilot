@@ -4,7 +4,7 @@ import hashlib
 import logging
 from pathlib import Path
 import subprocess
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -57,11 +57,15 @@ class RepoPilotRunService:
         run_store: RunStore | None = None,
         audit_logger: AuditLogger | None = None,
         installation_token_resolver: Callable[[RunOwner], str | None] | None = None,
+        lease_seconds: int = 1800,
+        heartbeat_interval_seconds: float = 60.0,
     ) -> None:
         self.run_store = run_store or RunStore()
         self.audit_logger = audit_logger or AuditLogger()
         self._installation_token_resolver = installation_token_resolver
         self._worker_id = uuid4().hex
+        self._lease_seconds = lease_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._request_ids: dict[str, str] = {}
         self._owners: dict[str, RunOwner] = {}
         self._execution_pending: set[str] = set()
@@ -117,7 +121,11 @@ class RepoPilotRunService:
         if run is None:
             return
         if run.lifecycle_status == "queued":
-            self.run_store.mark_running(run_id)
+            self.run_store.mark_running(
+                run_id,
+                worker_id=self._worker_id,
+                lease_seconds=self._lease_seconds,
+            )
             run = self.run_store.get(run_id)
             if run is None:
                 return
@@ -126,7 +134,10 @@ class RepoPilotRunService:
         self._execute_claimed_run(run)
 
     def execute_next_queued(self) -> RunStatusResponse | None:
-        run = self.run_store.claim_next_queued(worker_id=self._worker_id)
+        run = self.run_store.claim_next_queued(
+            worker_id=self._worker_id,
+            lease_seconds=self._lease_seconds,
+        )
         if run is None:
             return None
         self._execute_claimed_run(run)
@@ -143,6 +154,7 @@ class RepoPilotRunService:
             run_id=run_id,
             metadata=_trace_metadata(run_id=run_id, request_id=request_id),
         )
+        stop_heartbeat = self._start_lease_heartbeat(run_id)
         try:
             result = build_workflow().invoke(
                 _workflow_runtime_input(
@@ -180,6 +192,37 @@ class RepoPilotRunService:
                     "error_code": _audit_error_code(exc),
                 },
             )
+        finally:
+            stop_heartbeat()
+
+    def _start_lease_heartbeat(self, run_id: str) -> Callable[[], None]:
+        interval = self._heartbeat_interval_seconds
+        if interval <= 0:
+            return lambda: None
+        stop = Event()
+
+        def beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    renewed = self.run_store.renew_run_lease(
+                        run_id,
+                        worker_id=self._worker_id,
+                        lease_seconds=self._lease_seconds,
+                    )
+                except Exception:
+                    logger.exception("RepoPilot run lease heartbeat failed: run_id=%s", run_id)
+                    continue
+                if not renewed:
+                    return
+
+        thread = Thread(target=beat, name=f"repopilot-heartbeat-{run_id[:8]}", daemon=True)
+        thread.start()
+
+        def stop_thread() -> None:
+            stop.set()
+            thread.join(timeout=1)
+
+        return stop_thread
 
     def get_run(self, run_id: str) -> RunStatusResponse:
         run = self.run_store.get(run_id)

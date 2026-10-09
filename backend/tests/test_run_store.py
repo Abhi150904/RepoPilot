@@ -147,6 +147,24 @@ def test_sql_run_store_two_workers_claim_distinct_runs() -> None:
     assert empty_claim is None
 
 
+def test_sql_run_store_renews_only_owned_running_lease() -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+    run = store.create({"issue": "Renew me"})
+
+    claimed = store.claim_next_queued(worker_id="worker-1", lease_seconds=1)
+    assert claimed is not None
+
+    assert store.renew_run_lease(run.run_id, worker_id="worker-2", lease_seconds=3600) is False
+    assert store.renew_run_lease(run.run_id, worker_id="worker-1", lease_seconds=3600) is True
+
+    interrupted_count = store.recover_stale_running_runs(
+        stale_before=datetime.now(timezone.utc) + timedelta(seconds=10)
+    )
+
+    assert interrupted_count == 0
+    assert store.get(run.run_id).lifecycle_status == "running"  # type: ignore[union-attr]
+
+
 def test_sql_run_store_persists_publication_status_events() -> None:
     store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
     run = store.create({"issue": "Publish me"})
