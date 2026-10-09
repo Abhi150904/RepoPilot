@@ -5,8 +5,8 @@ import { useEffect, useMemo, useState } from "react";
 import { GitBranch, Github } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { ButtonLink } from "@/components/button";
-import { getGitHubRepositories, githubLoginUrl, RepoPilotApiError, type GitHubRepository } from "@/lib/api";
-import { readRunHistory, type StoredRunSummary } from "@/lib/run-history";
+import { getGitHubRepositories, githubLoginUrl, listRuns, RepoPilotApiError, type GitHubRepository } from "@/lib/api";
+import { summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 type RepositorySummary = {
   name: string;
@@ -19,20 +19,25 @@ export default function RepositoriesPage() {
   const [githubRepositories, setGithubRepositories] = useState<GitHubRepository[]>([]);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    setRuns(readRunHistory());
     let cancelled = false;
     async function loadRepositories() {
       try {
-        const response = await getGitHubRepositories();
+        const [response, backendRuns] = await Promise.all([getGitHubRepositories(), listRuns()]);
         if (!cancelled) {
           setGithubRepositories(response.repositories);
           setInstallUrl(response.install_url ?? null);
+          setRuns(summariesFromRuns(backendRuns));
+          setLoadError(null);
         }
       } catch (error) {
         if (!cancelled && error instanceof RepoPilotApiError && error.status === 401) {
           setAuthRequired(true);
+          setLoadError(null);
+        } else if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : "Could not load repository data.");
         }
       }
     }
@@ -51,10 +56,17 @@ export default function RepositoriesPage() {
           <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Repositories</p>
           <h1 className="mt-1 font-display text-2xl font-semibold">Connected workspaces</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
-            In hosted mode this page shows repositories authorized through the RepoPilot GitHub App. In local mode it falls back to repositories from your browser run history.
+            Repositories authorized through the RepoPilot GitHub App appear here with durable run history from the backend.
           </p>
         </div>
-        {authRequired ? (
+        {loadError ? (
+          <div className="p-5">
+            <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-5">
+              <h2 className="font-display text-lg font-semibold text-red-100">Could not load repositories.</h2>
+              <p className="mt-2 max-w-xl text-sm leading-6 text-red-100/80">{loadError}</p>
+            </div>
+          </div>
+        ) : authRequired ? (
           <div className="p-5">
             <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-5">
               <Github className="text-cyan-300" size={20} />

@@ -7,12 +7,13 @@ import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/button";
 import { createRun, listRuns, type RunRequest } from "@/lib/api";
 import { buildRunRequest } from "@/lib/run-request";
-import { readRunHistory, rememberRun, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
+import { summaryFromRun, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 export default function CommandCenterPage() {
   const [history, setHistory] = useState<StoredRunSummary[]>([]);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [repository, setRepository] = useState("");
   const [issueNumber, setIssueNumber] = useState("");
 
@@ -23,10 +24,12 @@ export default function CommandCenterPage() {
         const backendRuns = await listRuns();
         if (active) {
           setHistory(summariesFromRuns(backendRuns));
+          setHistoryError(null);
         }
-      } catch {
+      } catch (caught) {
         if (active) {
-          setHistory(readRunHistory());
+          setHistory([]);
+          setHistoryError(caught instanceof Error ? caught.message : "Could not load runs from the API.");
         }
       }
     }
@@ -58,7 +61,7 @@ export default function CommandCenterPage() {
     setError(null);
     try {
       const run = await createRun(request);
-      setHistory(rememberRun(run));
+      setHistory((current) => [summaryFromRun(run), ...current.filter((item) => item.runId !== run.run_id)]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not start run.");
     } finally {
@@ -93,7 +96,7 @@ export default function CommandCenterPage() {
           <AttentionPanel runs={needsAttention} />
           <ActivePanel runs={history.filter((run) => ["queued", "running"].includes(run.status))} />
         </section>
-        <RecentRuns runs={history} />
+        <RecentRuns runs={history} error={historyError} />
       </div>
     </AppShell>
   );
@@ -147,7 +150,7 @@ function AttentionPanel({ runs }: { runs: StoredRunSummary[] }) {
       <p className="font-display text-xs uppercase text-cyan-300">Needs your attention</p>
       <h2 className="mt-2 font-display text-3xl font-semibold">{runs.length ? `${runs.length} runs need your attention` : "You're all caught up."}</h2>
       <div className="mt-5 grid gap-3">
-        {(runs.length ? runs : [{ runId: "empty", repository: "No reviewed runs waiting", issue: "Completed runs that need your approval will appear here.", status: "empty", updatedAt: "" }]).map((run) => (
+        {(runs.length ? runs : [{ runId: "empty", repository: "No reviewed runs waiting", issue: "Completed runs that need your approval will appear here.", status: "empty", tests: "—", duration: "n/a", updatedAt: "" }]).map((run) => (
           <div key={run.runId} className="rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -174,7 +177,7 @@ function ActivePanel({ runs }: { runs: StoredRunSummary[] }) {
     <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
       <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Active engineering</p>
       <div className="mt-4 grid gap-3">
-        {(runs.length ? runs : [{ runId: "empty", repository: "No runs in progress", issue: "Start a run to watch RepoPilot work.", status: "idle", updatedAt: "" }]).map((run) => (
+        {(runs.length ? runs : [{ runId: "empty", repository: "No runs in progress", issue: "Start a run to watch RepoPilot work.", status: "idle", tests: "—", duration: "n/a", updatedAt: "" }]).map((run) => (
           <div key={run.runId} className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-3">
             <span>
               <strong className="block text-sm">{run.repository}</strong>
@@ -188,21 +191,27 @@ function ActivePanel({ runs }: { runs: StoredRunSummary[] }) {
   );
 }
 
-function RecentRuns({ runs }: { runs: StoredRunSummary[] }) {
+function RecentRuns({ runs, error }: { runs: StoredRunSummary[]; error: string | null }) {
   return (
     <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)]">
       <div className="border-b border-[var(--border)] px-5 py-4">
         <h2 className="font-display text-lg font-semibold">Recent runs</h2>
       </div>
       <div className="divide-y divide-[var(--border)]">
-        {(runs.length ? runs : []).map((run) => (
+        {error ? (
+          <div className="px-5 py-8">
+            <p className="text-sm text-red-300">Could not load recent runs.</p>
+            <p className="mt-2 text-sm text-[var(--text-secondary)]">{error}</p>
+          </div>
+        ) : null}
+        {!error && (runs.length ? runs : []).map((run) => (
           <Link key={run.runId} href={`/runs/${run.runId}`} className="grid gap-3 px-5 py-4 text-sm hover:bg-[var(--surface-elevated)] md:grid-cols-[1fr_120px_160px]">
             <span>{run.repository} <small className="text-[var(--text-secondary)]">{run.issue}</small></span>
             <span className="text-[var(--text-secondary)]">{run.status}</span>
             <span className="text-[var(--text-secondary)]">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ""}</span>
           </Link>
         ))}
-        {!runs.length ? (
+        {!error && !runs.length ? (
           <div className="px-5 py-8">
             <p className="text-sm text-[var(--text-secondary)]">No runs yet. Create your first run to build your execution history.</p>
             <Link className="mt-3 inline-flex text-sm font-medium text-cyan-300 hover:text-cyan-200" href="/app">Start a run</Link>

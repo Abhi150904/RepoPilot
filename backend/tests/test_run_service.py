@@ -28,6 +28,8 @@ def test_execute_next_queued_claims_and_completes_one_run(monkeypatch) -> None:
     assert completed is not None
     assert completed.run_id == first.run_id
     assert completed.lifecycle_status == "completed"
+    assert "run.stage.analysis" in [event["event_type"] for event in completed.events]
+    assert "run.stage.tests" in [event["event_type"] for event in completed.events]
     assert service.get_run(second.run_id).lifecycle_status == "queued"
     assert [event["event_type"] for event in audit.events] == [
         "run.created",
@@ -84,6 +86,18 @@ def _reviewed_result(run_id: str) -> dict[str, object]:
         "_run_id": run_id,
         "modified_files": ["app.py"],
         "diff": "--- app.py\n+++ app.py\n",
+        "analysis": {
+            "summary": "Missing validation.",
+            "suspected_area": "form handling",
+            "likely_cause": "blank input is accepted",
+            "risk_level": "low",
+        },
+        "plan": {
+            "summary": "Validate blank input.",
+            "steps": ["Trim input", "Block empty feedback"],
+            "files_to_inspect": ["app.py"],
+            "tests_required": ["blank input"],
+        },
         "test_analysis": {
             "status": "passed",
             "summary": "Tests passed.",
@@ -101,7 +115,18 @@ def _reviewed_result(run_id: str) -> dict[str, object]:
             "summary": "Tests passed and automated review approved the patch.",
             "tests_passed": True,
             "repair_attempts": 0,
-            "metrics": None,
+            "metrics": {
+                "stage_timings": [
+                    {"stage": "analyzer", "duration_ms": 12.5, "success": True},
+                    {"stage": "planner", "duration_ms": 9.5, "success": True},
+                ],
+            },
             "next_action": "human_review",
+        },
+        "run_metrics": {
+            "stage_timings": [
+                {"stage": "analyzer", "duration_ms": 12.5, "success": True},
+                {"stage": "planner", "duration_ms": 9.5, "success": True},
+            ],
         },
     }

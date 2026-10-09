@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 from threading import Lock
 from typing import Any, Callable
+from uuid import uuid4
 
 from app.agents.approval import ApprovalGate
 from app.agents.publication import PublicationPreparer
@@ -60,6 +61,7 @@ class RepoPilotRunService:
         self.run_store = run_store or RunStore()
         self.audit_logger = audit_logger or AuditLogger()
         self._installation_token_resolver = installation_token_resolver
+        self._worker_id = uuid4().hex
         self._request_ids: dict[str, str] = {}
         self._owners: dict[str, RunOwner] = {}
         self._execution_pending: set[str] = set()
@@ -124,11 +126,14 @@ class RepoPilotRunService:
         self._execute_claimed_run(run)
 
     def execute_next_queued(self) -> RunStatusResponse | None:
-        run = self.run_store.claim_next_queued()
+        run = self.run_store.claim_next_queued(worker_id=self._worker_id)
         if run is None:
             return None
         self._execute_claimed_run(run)
         return self.run_store.get(run.run_id)
+
+    def recover_stale_runs(self) -> int:
+        return self.run_store.recover_stale_running_runs()
 
     def _execute_claimed_run(self, run: RunStatusResponse) -> None:
         run_id = run.run_id

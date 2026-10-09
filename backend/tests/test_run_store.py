@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from app.api.runs import IdempotencyConflict, RunStore
+from app.api.schemas import RunArtifacts, RunResponse
 from app.auth.models import RunOwner
 
 
@@ -38,6 +40,11 @@ def test_sql_run_store_persists_run_records() -> None:
             github_login="octo",
             installation_id=123,
         )
+        with store._session_factory() as session:  # type: ignore[union-attr]
+            identity_count = session.execute(text("select count(*) from github_identities")).scalar_one()
+            installation_count = session.execute(text("select count(*) from github_installations")).scalar_one()
+        assert identity_count == 1
+        assert installation_count == 1
     finally:
         if store is not None:
             store.close()
@@ -75,15 +82,37 @@ def test_sql_run_store_idempotency_conflicts_for_different_payload() -> None:
         raise AssertionError("Expected idempotency conflict")
 
 
-def test_sql_run_store_interrupts_running_runs_on_restart() -> None:
+def test_sql_run_store_scopes_idempotency_by_owner() -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+    octo = RunOwner(github_user_id=101, github_login="octo")
+    mona = RunOwner(github_user_id=202, github_login="mona")
+
+    first = store.create({"issue": "Fix login"}, owner=octo, idempotency_key="shared-key")
+    second = store.create({"issue": "Fix login"}, owner=mona, idempotency_key="shared-key")
+    repeated = store.create({"issue": "Fix login"}, owner=octo, idempotency_key="shared-key")
+
+    assert second.run_id != first.run_id
+    assert repeated.run_id == first.run_id
+
+
+def test_sql_run_store_recovery_is_explicit_and_stale_only() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     store = RunStore(engine=engine)
     run = store.create({"issue": "Fix login"})
-    store.mark_running(run.run_id)
+    claimed = store.claim_next_queued(lease_seconds=3600)
+    assert claimed is not None
 
     restarted = RunStore(engine=engine)
+    still_running = restarted.get(run.run_id)
+    assert still_running is not None
+    assert still_running.lifecycle_status == "running"
+
+    interrupted_count = restarted.recover_stale_running_runs(
+        stale_before=datetime.now(timezone.utc) + timedelta(hours=2)
+    )
     recovered = restarted.get(run.run_id)
 
+    assert interrupted_count == 1
     assert recovered is not None
     assert recovered.lifecycle_status == "interrupted"
     assert recovered.error is not None
@@ -103,6 +132,19 @@ def test_sql_run_store_claims_only_one_queued_run() -> None:
     assert claimed.lifecycle_status == "running"
     assert store.get(first.run_id).lifecycle_status == "running"  # type: ignore[union-attr]
     assert store.get(second.run_id).lifecycle_status == "queued"  # type: ignore[union-attr]
+
+
+def test_sql_run_store_two_workers_claim_distinct_runs() -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+    first = store.create({"issue": "First"})
+    second = store.create({"issue": "Second"})
+
+    first_claim = store.claim_next_queued(worker_id="worker-1")
+    second_claim = store.claim_next_queued(worker_id="worker-2")
+    empty_claim = store.claim_next_queued(worker_id="worker-3")
+
+    assert {first_claim.run_id, second_claim.run_id} == {first.run_id, second.run_id}  # type: ignore[union-attr]
+    assert empty_claim is None
 
 
 def test_sql_run_store_persists_publication_status_events() -> None:
@@ -131,6 +173,34 @@ def test_sql_run_store_persists_publication_status_events() -> None:
         "run.publication_published",
     ]
     assert published.events[-1]["metadata"]["pr_url"] == "https://github.com/octo/repo/pull/1"
+
+
+def test_sql_run_store_persists_publish_results() -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+    run = store.create({"issue": "Publish me"})
+    response = RunResponse(
+        status="published",
+        next_action="done",
+        summary="Published.",
+        artifacts=RunArtifacts(),
+        run_summary={"status": "published", "summary": "Published.", "next_action": "done"},
+        result={
+            "run_summary": {"status": "published", "summary": "Published.", "next_action": "done"},
+            "publish_result": {
+                "mode": "pr",
+                "status": "published",
+                "branch_name": "repopilot/issue-1",
+                "pr_url": "https://github.com/octo/repo/pull/1",
+                "summary": "PR opened.",
+            },
+        },
+    )
+
+    store.update_response(run.run_id, response)
+
+    with store._session_factory() as session:  # type: ignore[union-attr]
+        persisted = session.execute(text("select status, pr_url from publish_results")).first()
+    assert persisted == ("published", "https://github.com/octo/repo/pull/1")
 
 
 def test_sql_run_store_lists_recent_runs_for_owner() -> None:

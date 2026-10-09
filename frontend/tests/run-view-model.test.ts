@@ -58,7 +58,7 @@ describe("buildRunView", () => {
     expect(view.planSteps).toEqual(["Add validation", "Add regression test"]);
     expect(view.diffStats).toBe("+1 -1");
     expect(view.tests.label).toBe("passed");
-    expect(view.review.confidence).toBe("96");
+    expect(view.review.confidence).toBe("n/a");
     expect(view.tokens).toBe("6.4k");
     expect(view.verification.every((item) => item.verified)).toBe(true);
     expect(view.publish.prUrl).toBe("https://github.com/example/demo/pull/1");

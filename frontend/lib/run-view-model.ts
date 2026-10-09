@@ -10,7 +10,6 @@ import {
   UserCheck
 } from "lucide-react";
 import type { RunStatusResponse } from "@/lib/api";
-import { diffLines as fallbackDiffLines, planSteps as fallbackPlanSteps } from "@/lib/sample-data";
 
 export type DiffLine = {
   kind: "add" | "remove" | "context";
@@ -171,11 +170,11 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     review: {
       blockers: reviewStatus === "blocked" || reviewStatus === "changes_requested" ? 1 : 0,
       notes: reviewStatus ? 2 : 0,
-      confidence: reviewStatus ? (reviewStatus === "approved" || reviewStatus === "ready" ? "96" : "84") : "n/a",
-      risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), hasRun ? "n/a" : "Moderate")
+      confidence: formatMetric(dict(summary.metrics)?.review_confidence ?? dict(result.run_metrics)?.review_confidence, "n/a"),
+      risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), "n/a")
     },
     repairAttempts: String(numberValue(result.repair_attempts) ?? numberValue(summary.repair_attempts) ?? 0),
-    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, hasRun ? "n/a" : "6.4k"),
+    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, "n/a"),
     verification: [
       { label: "Workspace verified", verified: dict(approvalBinding?.git_safety)?.status === "safe" || approvalBinding?.status === "bound" },
       { label: "Tests passed", verified: testsPassed === true },
@@ -185,9 +184,9 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     ],
     publish: {
       mode: stringValue(publishResult?.mode) ?? "",
-      branch: firstString(stringValue(publishResult?.branch_name), stringValue(publicationPackage?.branch_name), hasRun ? "Not prepared" : "repopilot/issue-42-publication-integrity"),
+      branch: firstString(stringValue(publishResult?.branch_name), stringValue(publicationPackage?.branch_name), "Not prepared"),
       repository,
-      title: firstString(stringValue(publicationPackage?.pr_title), hasRun ? "No pull request prepared" : "fix: harden publication lifecycle"),
+      title: firstString(stringValue(publicationPackage?.pr_title), "No pull request prepared"),
       status: stringValue(publishResult?.status) ?? (hasRun ? "Locked" : "Ready"),
       summary: stringValue(publishResult?.summary) ?? "Approve a completed run before publishing.",
       prUrl: publishResult?.status === "published"
@@ -199,8 +198,8 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
       reason: stringValue(testAnalysis?.summary) ?? stringValue(llmError?.message) ?? "Expected push stage to resume after existing commit.",
       repair: stringValue(dict(result.repair_decision)?.summary) ?? (hasRun ? "No automated repair was available for this stop." : "RepoPilot identified the failure as repairable."),
       attempt: `${numberValue(result.repair_attempts) ?? 0} / ${numberValue(run?.request.max_repair_attempts) ?? 2}`,
-      passed: testsPassed === false ? 17 : 26,
-      failed: testsPassed === false ? 2 : 0
+      passed: numberValue(dict(result.test_result)?.passed) ?? 0,
+      failed: numberValue(dict(result.test_result)?.failed) ?? 0
     }
   };
 }
@@ -248,10 +247,28 @@ function eventTimelineItem(
       return eventItem("Run interrupted", TimerReset, "active", "Backend restarted before completion");
     case "run.updated":
       return eventItem("Run updated", UserCheck, "complete", "Review state was saved");
+    case "run.stage.analysis":
+      return eventItem("Issue analysis", Radar, "complete", stageDetail(metadata, "Intent and risk extracted"));
+    case "run.stage.retrieval":
+      return eventItem("Repository retrieval", Braces, "complete", stageDetail(metadata, "Repository context collected"));
+    case "run.stage.planning":
+      return eventItem("Implementation plan", Play, "complete", stageDetail(metadata, "Plan produced"));
+    case "run.stage.code":
+      return eventItem("Code generation", Code2, "complete", stageDetail(metadata, "Code changes proposed"));
+    case "run.stage.tests":
+      return eventItem("Tests", TestTube2, "complete", stageDetail(metadata, "Test result recorded"));
+    case "run.stage.repair":
+      return eventItem("Repair", TimerReset, "complete", stageDetail(metadata, "Repair decision recorded"));
+    case "run.stage.review":
+      return eventItem("Automated review", ShieldCheck, "complete", stageDetail(metadata, "Review result recorded"));
+    case "run.stage.approval":
+      return eventItem("Approval", UserCheck, "complete", stageDetail(metadata, "Approval state recorded"));
+    case "run.stage.publication":
+      return eventItem("Publication", GitPullRequestArrow, "complete", stageDetail(metadata, "Publication package prepared"));
     case "run.publication_started":
       return eventItem("Publication started", GitPullRequestArrow, active ? "active" : "complete", mode ? `Mode: ${modeLabel(mode)}` : "Publishing");
     case "run.publication_ready":
-      return eventItem("Publication ready", GitPullRequestArrow, "complete", status ? `Status: ${status}` : "Dry run passed");
+      return eventItem("Publication ready", GitPullRequestArrow, "complete", status ? `Status: ${status}` : "Publication checks completed");
     case "run.publication_published":
       return eventItem("Published", GitPullRequestArrow, "complete", prUrl ?? "Publication finished");
     case "run.publication_failed":
@@ -259,6 +276,14 @@ function eventTimelineItem(
     default:
       return eventItem(titleFromEvent(event.event_type), Radar, active ? "active" : "complete", detailFromMetadata(metadata, "Recorded by RepoPilot"));
   }
+}
+
+function stageDetail(metadata: Record<string, unknown>, fallback: string): string {
+  const duration = numberValue(metadata.duration_ms);
+  if (duration !== undefined) {
+    return `${Math.round(duration)}ms`;
+  }
+  return fallback;
 }
 
 function eventItem(
@@ -366,7 +391,7 @@ function stepsFromPlan(plan: Record<string, unknown> | null, hasRun = false): st
   if (hasRun) {
     return ["No implementation plan was produced for this run."];
   }
-  return fallbackPlanSteps;
+  return ["No implementation plan has been produced yet."];
 }
 
 function failureSummary(run: RunStatusResponse | null): string | undefined {
@@ -391,7 +416,7 @@ function diffFromText(diff?: string, hasRun = false): DiffLine[] {
     if (hasRun) {
       return [{ kind: "context", text: "No diff was generated for this run." }];
     }
-    return fallbackDiffLines as DiffLine[];
+    return [{ kind: "context", text: "No diff is available yet." }];
   }
   return diff
     .split("\n")

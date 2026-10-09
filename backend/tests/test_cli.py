@@ -556,6 +556,9 @@ def test_cli_worker_run_once_reports_no_queued_runs(monkeypatch, capsys) -> None
     cli = importlib.import_module("app.cli")
 
     class FakeService:
+        def recover_stale_runs(self):
+            return 0
+
         def execute_next_queued(self):
             return None
 
@@ -571,6 +574,9 @@ def test_cli_worker_run_once_claims_one_run(monkeypatch, capsys) -> None:
     cli = importlib.import_module("app.cli")
 
     class FakeService:
+        def recover_stale_runs(self):
+            return 0
+
         def execute_next_queued(self):
             return SimpleNamespace(
                 run_id="run-1",
@@ -601,6 +607,9 @@ def test_cli_worker_run_loop_respects_max_runs(monkeypatch, capsys) -> None:
     calls = {"count": 0}
 
     class FakeService:
+        def recover_stale_runs(self):
+            return 0
+
         def execute_next_queued(self):
             calls["count"] += 1
             return SimpleNamespace(

@@ -361,13 +361,18 @@ def _publish_request_mode(mode: str) -> str:
 
 def _run_worker_command(args: argparse.Namespace) -> int:
     if args.worker_command == "run-once":
-        executed = _worker_run_once()
+        worker = _persistent_run_service()
+        worker.recover_stale_runs()
+        executed = _worker_run_once(worker)
         _print_worker_result(executed=executed, json_output=args.json)
         return 0
     if args.worker_command == "run":
+        worker = _persistent_run_service()
+        worker.recover_stale_runs()
         executed = _worker_loop(
             poll_interval=args.poll_interval,
             max_runs=args.max_runs,
+            service=worker,
         )
         _print_worker_result(executed=executed, json_output=args.json)
         return 0

@@ -5,13 +5,14 @@ import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { ButtonLink } from "@/components/button";
 import { listRuns } from "@/lib/api";
-import { readRunHistory, stageForStatus, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
+import { stageForStatus, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 const filters = ["All", "Running", "Needs review", "Completed", "Failed"];
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<StoredRunSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState("All");
 
   useEffect(() => {
@@ -22,10 +23,12 @@ export default function RunsPage() {
         const backendRuns = await listRuns();
         if (active) {
           setRuns(summariesFromRuns(backendRuns));
+          setLoadError(null);
         }
-      } catch {
+      } catch (caught) {
         if (active) {
-          setRuns(readRunHistory());
+          setRuns([]);
+          setLoadError(caught instanceof Error ? caught.message : "Could not load runs from the API.");
         }
       } finally {
         if (active) {
@@ -84,18 +87,24 @@ export default function RunsPage() {
               <p className="text-sm text-[var(--text-secondary)]">Loading run history...</p>
             </div>
           ) : null}
+          {!isLoading && loadError ? (
+            <div className="px-5 py-10">
+              <p className="text-sm text-red-300">Could not load run history.</p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">{loadError}</p>
+            </div>
+          ) : null}
           {visibleRuns.map((run) => (
             <Link key={run.runId} href={`/runs/${run.runId}`} className="grid min-w-[900px] grid-cols-[1fr_120px_140px_110px_100px_100px_170px] border-b border-[var(--border)] px-5 py-4 text-sm hover:bg-[var(--surface-elevated)]">
               <span>{run.repository}</span>
               <span className="text-[var(--text-secondary)]">{run.issue}</span>
               <span>{stageForStatus(run.status)}</span>
               <span className="text-[var(--text-secondary)]">{run.status}</span>
-              <span className="text-lime-300">passed</span>
-              <span className="text-[var(--text-secondary)]">live</span>
+              <span className="text-[var(--text-secondary)]">{run.tests}</span>
+              <span className="text-[var(--text-secondary)]">{run.duration}</span>
               <span className="text-[var(--text-secondary)]">{new Date(run.updatedAt).toLocaleString()}</span>
             </Link>
           ))}
-          {!isLoading && !visibleRuns.length ? (
+          {!isLoading && !loadError && !visibleRuns.length ? (
             <div className="px-5 py-10">
               <p className="text-sm text-[var(--text-secondary)]">No runs yet. Start your first RepoPilot run to see its execution history here.</p>
               <ButtonLink className="mt-4" href="/app" variant="primary">Start a run</ButtonLink>
