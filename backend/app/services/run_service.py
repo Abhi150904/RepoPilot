@@ -34,6 +34,7 @@ from app.core.audit import (
     RUN_STARTED,
     AuditLogger,
 )
+from app.core.llm_usage import LLMCallContext, LLMUsageRecorderProtocol, llm_call_context
 from app.graph.workflow import build_workflow
 from app.schemas.execution import ApprovalDecision, PublicationPackage, PublishResult, ReviewResult
 from app.tools.git import inspect_git_safety
@@ -57,12 +58,14 @@ class RepoPilotRunService:
         run_store: RunStore | None = None,
         audit_logger: AuditLogger | None = None,
         installation_token_resolver: Callable[[RunOwner], str | None] | None = None,
+        llm_usage_recorder: LLMUsageRecorderProtocol | None = None,
         lease_seconds: int = 1800,
         heartbeat_interval_seconds: float = 60.0,
     ) -> None:
         self.run_store = run_store or RunStore()
         self.audit_logger = audit_logger or AuditLogger()
         self._installation_token_resolver = installation_token_resolver
+        self._llm_usage_recorder = llm_usage_recorder
         self._worker_id = uuid4().hex
         self._lease_seconds = lease_seconds
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
@@ -156,13 +159,20 @@ class RepoPilotRunService:
         )
         stop_heartbeat = self._start_lease_heartbeat(run_id)
         try:
-            result = build_workflow().invoke(
-                _workflow_runtime_input(
-                    run.request,
+            with llm_call_context(
+                LLMCallContext(
                     run_id=run_id,
-                    github_token=self._github_token_for_run(run_id),
+                    request_id=request_id,
+                    recorder=self._llm_usage_recorder,
                 )
-            )
+            ):
+                result = build_workflow().invoke(
+                    _workflow_runtime_input(
+                        run.request,
+                        run_id=run_id,
+                        github_token=self._github_token_for_run(run_id),
+                    )
+                )
             response = _run_response(result)
             self.run_store.mark_completed(run_id, response)
             self.audit_logger.record(

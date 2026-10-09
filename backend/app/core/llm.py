@@ -11,6 +11,8 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings, get_settings
+from app.core.llm_usage import record_llm_usage
+from app.core.pricing import estimate_llm_cost_usd
 from app.schemas.code_change import CodeChangeSet, FileChange, SourceFile
 from app.schemas.execution import (
     LLMUsageEvent,
@@ -366,22 +368,28 @@ class GeminiLLMProvider(LLMProvider):
         retry_count: int,
         error: Exception | None,
     ) -> None:
-        self._usage_events.append(
-            LLMUsageEvent(
+        event = LLMUsageEvent(
+            provider="gemini",
+            model=self._model,
+            role=self._role,
+            usage_source=_usage_source(usage_totals),
+            prompt_tokens=usage_totals["prompt_tokens"],
+            output_tokens=usage_totals["output_tokens"],
+            total_tokens=usage_totals["total_tokens"],
+            estimated_cost_usd=estimate_llm_cost_usd(
                 provider="gemini",
                 model=self._model,
-                role=self._role,
                 prompt_tokens=usage_totals["prompt_tokens"],
                 output_tokens=usage_totals["output_tokens"],
-                total_tokens=usage_totals["total_tokens"],
-                estimated_cost_usd=None,
-                duration_ms=duration_ms,
-                success=success,
-                retry_count=retry_count,
-                error_type=error.__class__.__name__ if error else None,
-                error_message=str(error) if error else None,
-            )
+            ),
+            duration_ms=duration_ms,
+            success=success,
+            retry_count=retry_count,
+            error_type=error.__class__.__name__ if error else None,
+            error_message=str(error) if error else None,
         )
+        self._usage_events.append(event)
+        record_llm_usage(event)
 
 
 class GroqLLMProvider(LLMProvider):
@@ -567,22 +575,28 @@ class GroqLLMProvider(LLMProvider):
         retry_count: int,
         error: Exception | None,
     ) -> None:
-        self._usage_events.append(
-            LLMUsageEvent(
+        event = LLMUsageEvent(
+            provider="groq",
+            model=self._model,
+            role=self._role,
+            usage_source=_usage_source(usage_totals),
+            prompt_tokens=usage_totals["prompt_tokens"],
+            output_tokens=usage_totals["output_tokens"],
+            total_tokens=usage_totals["total_tokens"],
+            estimated_cost_usd=estimate_llm_cost_usd(
                 provider="groq",
                 model=self._model,
-                role=self._role,
                 prompt_tokens=usage_totals["prompt_tokens"],
                 output_tokens=usage_totals["output_tokens"],
-                total_tokens=usage_totals["total_tokens"],
-                estimated_cost_usd=None,
-                duration_ms=duration_ms,
-                success=success,
-                retry_count=retry_count,
-                error_type=error.__class__.__name__ if error else None,
-                error_message=str(error) if error else None,
-            )
+            ),
+            duration_ms=duration_ms,
+            success=success,
+            retry_count=retry_count,
+            error_type=error.__class__.__name__ if error else None,
+            error_message=str(error) if error else None,
         )
+        self._usage_events.append(event)
+        record_llm_usage(event)
 
 
 def get_llm(role: str, settings: Settings | None = None) -> LLMProvider:
@@ -1096,6 +1110,12 @@ def _sum_optional_ints(left: int | None, right: int | None) -> int | None:
     if right is None:
         return left
     return left + right
+
+
+def _usage_source(usage_totals: dict[str, int | None]) -> str:
+    if any(value is not None for value in usage_totals.values()):
+        return "provider"
+    return "unavailable"
 
 
 def _optional_int(value: object) -> int | None:

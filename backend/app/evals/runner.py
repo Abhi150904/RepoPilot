@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from typing import Iterable
 
+from app.core.llm_usage import LLMCallContext, LLMUsageRecorderProtocol, llm_call_context
 from app.evals.models import (
     EvalCase,
     EvalCaseResult,
@@ -24,7 +25,13 @@ def load_eval_case(path: Path) -> EvalCase:
     return EvalCase.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
-def run_eval_case(path: Path) -> EvalCaseResult:
+def run_eval_case(
+    path: Path,
+    *,
+    eval_run_id: str | None = None,
+    eval_case_id: int | None = None,
+    usage_recorder: LLMUsageRecorderProtocol | None = None,
+) -> EvalCaseResult:
     case = load_eval_case(path)
     workflow_input: dict[str, object] = {"issue": case.issue}
     workspace_path = _prepare_workspace(case=case, case_file=path)
@@ -43,7 +50,14 @@ def run_eval_case(path: Path) -> EvalCaseResult:
         if case.approved:
             workflow_input["approved"] = True
 
-        result = build_workflow().invoke(workflow_input)
+        with llm_call_context(
+            LLMCallContext(
+                eval_run_id=eval_run_id,
+                eval_case_id=eval_case_id,
+                recorder=usage_recorder,
+            )
+        ):
+            result = build_workflow().invoke(workflow_input)
         return evaluate_result(case=case, result=result)
     finally:
         if case.copy_workspace and workspace_path is not None:
