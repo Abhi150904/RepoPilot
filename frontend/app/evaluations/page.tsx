@@ -14,7 +14,7 @@ import {
 } from "@/lib/api";
 
 const retrievalMetrics = ["recall_at_3", "recall_at_5", "precision_at_5", "mrr", "total_tokens", "estimated_cost_usd"];
-const workflowMetrics = ["task_success_rate", "test_pass_rate", "repair_success_rate", "total_tokens", "estimated_cost_usd", "average_case_duration_ms"];
+const workflowMetrics = ["task_success_rate", "test_pass_rate", "repair_success_rate", "repair_attempts_total", "total_tokens", "estimated_cost_usd", "average_case_duration_ms"];
 
 export default function EvaluationsPage() {
   const [suites, setSuites] = useState<EvaluationSuite[]>([]);

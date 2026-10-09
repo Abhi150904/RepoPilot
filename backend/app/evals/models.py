@@ -42,6 +42,8 @@ class EvalCaseResult(BaseModel):
     points_earned: int = 0
     points_possible: int = 0
     score: float = 0.0
+    repair_attempts: int = 0
+    repair_succeeded: bool | None = None
 
 
 class EvalSuiteResult(BaseModel):

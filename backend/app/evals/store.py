@@ -76,11 +76,13 @@ class EvalRunRow(EvaluationBase):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owner_key: Mapped[str] = mapped_column(String(255), nullable=False, default="anonymous")
     error_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     safe_error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     idempotency_owner_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    benchmark_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class EvalCaseResultRow(EvaluationBase):
@@ -148,8 +150,12 @@ class EvaluationStore:
                 session.add(suite)
                 session.flush()
             else:
+                existing_cases = list(session.scalars(select(EvalCaseRow).where(EvalCaseRow.suite_id == suite.id).order_by(EvalCaseRow.case_key)))
+                if suite.eval_type != eval_type or _cases_hash(existing_cases) != _case_payloads_hash(cases):
+                    raise EvaluationConflict("Evaluation suite versions are immutable. Bump the suite version when benchmark cases change.")
                 suite.description = description
-                suite.eval_type = eval_type
+                session.commit()
+                return _suite_response(suite)
             for case in cases:
                 existing = session.scalars(
                     select(EvalCaseRow).where(EvalCaseRow.suite_id == suite.id, EvalCaseRow.case_key == case["case_key"])
@@ -190,12 +196,21 @@ class EvaluationStore:
             rows = session.scalars(select(EvalCaseRow).where(EvalCaseRow.suite_id == suite_id).order_by(EvalCaseRow.case_key))
             return [_detach(row) for row in rows]
 
+    def run_case_snapshots(self, eval_run_id: str) -> list[dict[str, Any]]:
+        with self._session_factory() as session:
+            row = session.get(EvalRunRow, eval_run_id)
+            if row is None:
+                raise KeyError(eval_run_id)
+            cases = dict(row.benchmark_snapshot_json or {}).get("cases")
+            return list(cases) if isinstance(cases, list) else []
+
     def create_run(
         self,
         *,
         suite_id: int,
         configuration: dict[str, Any],
         created_by: str | None,
+        owner_key: str,
         idempotency_key: str | None,
         idempotency_owner_key: str,
     ) -> EvalRunCreateResult:
@@ -217,9 +232,11 @@ class EvaluationStore:
                 configuration_json=dict(configuration),
                 created_at=now,
                 created_by=created_by,
+                owner_key=owner_key,
                 idempotency_key=idempotency_key,
                 idempotency_owner_key=idempotency_owner_key if idempotency_key else None,
                 payload_hash=payload_hash if idempotency_key else None,
+                benchmark_snapshot_json=_benchmark_snapshot(session, suite_id),
             )
             session.add(row)
             try:
@@ -247,6 +264,20 @@ class EvaluationStore:
             row.status = "running"
             row.started_at = _now()
             session.commit()
+
+    def interrupt_running_runs(self) -> int:
+        now = _now()
+        count = 0
+        with self._session_factory() as session:
+            rows = session.scalars(select(EvalRunRow).where(EvalRunRow.status == "running"))
+            for row in rows:
+                row.status = "interrupted"
+                row.completed_at = now
+                row.error_type = "Interrupted"
+                row.safe_error_message = "Evaluation was interrupted before completion. Start a new evaluation run to retry."
+                count += 1
+            session.commit()
+        return count
 
     def complete_run(self, eval_run_id: str, metrics: dict[str, float | None]) -> None:
         now = _now()
@@ -299,10 +330,12 @@ class EvaluationStore:
             )
             session.commit()
 
-    def get_run(self, eval_run_id: str) -> EvaluationRunResponse | None:
+    def get_run(self, eval_run_id: str, *, owner_key: str | None = None) -> EvaluationRunResponse | None:
         with self._session_factory() as session:
             row = session.get(EvalRunRow, eval_run_id)
             if row is None:
+                return None
+            if owner_key is not None and row.owner_key != owner_key:
                 return None
             suite = session.get(EvalSuiteRow, row.suite_id)
             return _run_response(
@@ -312,9 +345,12 @@ class EvaluationStore:
                 case_results=_case_results_for_run(session, row.id),
             )
 
-    def list_runs(self, limit: int = 50) -> list[EvaluationRunResponse]:
+    def list_runs(self, *, owner_key: str | None = None, limit: int = 50) -> list[EvaluationRunResponse]:
         with self._session_factory() as session:
-            rows = list(session.scalars(select(EvalRunRow).order_by(EvalRunRow.created_at.desc()).limit(limit)))
+            statement = select(EvalRunRow).order_by(EvalRunRow.created_at.desc()).limit(limit)
+            if owner_key is not None:
+                statement = statement.where(EvalRunRow.owner_key == owner_key)
+            rows = list(session.scalars(statement))
             return [
                 _run_response(
                     row=row,
@@ -384,6 +420,32 @@ def _run_response(
     )
 
 
+def _benchmark_snapshot(session: Session, suite_id: int) -> dict[str, Any]:
+    suite = session.get(EvalSuiteRow, suite_id)
+    cases = list(session.scalars(select(EvalCaseRow).where(EvalCaseRow.suite_id == suite_id).order_by(EvalCaseRow.case_key)))
+    snapshot_cases = [
+        {
+            "id": case.id,
+            "case_key": case.case_key,
+            "input_json": dict(case.input_json or {}),
+            "expected_json": dict(case.expected_json or {}),
+            "metadata_json": dict(case.metadata_json or {}),
+        }
+        for case in cases
+    ]
+    return {
+        "suite": {
+            "id": suite.id if suite else suite_id,
+            "name": suite.name if suite else "unknown",
+            "version": suite.version if suite else "unknown",
+            "eval_type": suite.eval_type if suite else "unknown",
+            "description": suite.description if suite else None,
+        },
+        "cases": snapshot_cases,
+        "snapshot_hash": _payload_hash({"suite_id": suite_id, "cases": snapshot_cases}),
+    }
+
+
 def _metrics_for_run(session: Session, eval_run_id: str) -> list[EvaluationMetricResponse]:
     rows = session.scalars(select(EvalMetricRow).where(EvalMetricRow.eval_run_id == eval_run_id).order_by(EvalMetricRow.metric_name))
     return [
@@ -435,6 +497,38 @@ def _now() -> datetime:
 def _payload_hash(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _cases_hash(cases: list[EvalCaseRow]) -> str:
+    return _payload_hash(
+        {
+            "cases": [
+                {
+                    "case_key": case.case_key,
+                    "input_json": case.input_json,
+                    "expected_json": case.expected_json,
+                    "metadata_json": case.metadata_json,
+                }
+                for case in sorted(cases, key=lambda item: item.case_key)
+            ]
+        }
+    )
+
+
+def _case_payloads_hash(cases: list[dict[str, Any]]) -> str:
+    return _payload_hash(
+        {
+            "cases": [
+                {
+                    "case_key": case["case_key"],
+                    "input_json": dict(case.get("input_json") or {}),
+                    "expected_json": dict(case.get("expected_json") or {}),
+                    "metadata_json": dict(case.get("metadata_json") or {}),
+                }
+                for case in sorted(cases, key=lambda item: str(item["case_key"]))
+            ]
+        }
+    )
 
 
 def _safe_error_message(exc: Exception) -> str:

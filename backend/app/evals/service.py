@@ -88,6 +88,9 @@ class EvaluationService:
         self.ensure_builtin_suites()
         return self.store.list_suites()
 
+    def recover_interrupted_runs(self) -> int:
+        return self.store.interrupt_running_runs()
+
     def create_and_run(
         self,
         request: EvaluationRunRequest,
@@ -106,6 +109,7 @@ class EvaluationService:
                 suite_id=suite.id,
                 configuration=configuration,
                 created_by=created_by,
+                owner_key=idempotency_owner_key,
                 idempotency_key=idempotency_key,
                 idempotency_owner_key=idempotency_owner_key,
             )
@@ -133,21 +137,21 @@ class EvaluationService:
             raise EvaluationServiceError(status_code=404, code="eval_run_not_found", message="Evaluation run not found.")
         return run
 
-    def list_runs(self) -> list[EvaluationRunResponse]:
+    def list_runs(self, *, owner_key: str | None = None) -> list[EvaluationRunResponse]:
         self.ensure_builtin_suites()
-        return self.store.list_runs()
+        return self.store.list_runs(owner_key=owner_key)
 
-    def get_run(self, eval_run_id: str) -> EvaluationRunResponse:
-        run = self.store.get_run(eval_run_id)
+    def get_run(self, eval_run_id: str, *, owner_key: str | None = None) -> EvaluationRunResponse:
+        run = self.store.get_run(eval_run_id, owner_key=owner_key)
         if run is None:
             raise EvaluationServiceError(status_code=404, code="eval_run_not_found", message="Evaluation run not found.")
         return run
 
-    def compare(self, run_ids: list[str]) -> EvaluationComparisonResponse:
+    def compare(self, run_ids: list[str], *, owner_key: str | None = None) -> EvaluationComparisonResponse:
         if len(run_ids) != 2:
             raise EvaluationServiceError(status_code=422, code="invalid_eval_comparison", message="Exactly two eval run IDs are required.")
-        baseline = self.get_run(run_ids[0])
-        current = self.get_run(run_ids[1])
+        baseline = self.get_run(run_ids[0], owner_key=owner_key)
+        current = self.get_run(run_ids[1], owner_key=owner_key)
         compatible = baseline.suite_name == current.suite_name and baseline.suite_id == current.suite_id
         baseline_metrics = {metric.metric_name: metric.metric_value for metric in baseline.metrics}
         current_metrics = {metric.metric_name: metric.metric_value for metric in current.metrics}
@@ -200,15 +204,15 @@ class EvaluationService:
         raise EvaluationServiceError(status_code=422, code="invalid_eval_config", message="Unsupported evaluation type.")
 
     def _run_retrieval_suite(self, eval_run_id: str, suite_id: int, configuration: dict[str, Any]) -> None:
-        cases = self.store.suite_cases(suite_id)
+        cases = self.store.run_case_snapshots(eval_run_id)
         benchmark = RetrievalBenchmark(
             cases=[
                 RetrievalBenchmarkCase(
-                    id=case.case_key,
-                    query=case.input_json["query"],
-                    query_terms=list(case.input_json.get("query_terms") or []),
-                    relevant_paths=list(case.expected_json["relevant_paths"]),
-                    chunks=case.input_json["chunks"],
+                    id=str(case["case_key"]),
+                    query=case["input_json"]["query"],
+                    query_terms=list(case["input_json"].get("query_terms") or []),
+                    relevant_paths=list(case["expected_json"]["relevant_paths"]),
+                    chunks=case["input_json"]["chunks"],
                 )
                 for case in cases
             ],
@@ -221,7 +225,7 @@ class EvaluationService:
             retrievers={strategy: retrievers[strategy]},
             limit=configuration["limit"],
         )
-        case_lookup = {case.case_key: case for case in cases}
+        case_lookup = {case["case_key"]: case for case in cases}
         for case_result in result.cases:
             case = case_lookup[case_result.case_id]
             measurements = {
@@ -232,7 +236,7 @@ class EvaluationService:
             }
             self.store.add_case_result(
                 eval_run_id=eval_run_id,
-                eval_case_id=case.id,
+                eval_case_id=int(case["id"]),
                 status="passed",
                 output={"ranked_paths": case_result.ranked_paths},
                 measurements=measurements,
@@ -257,21 +261,24 @@ class EvaluationService:
     def _run_workflow_suite(self, eval_run_id: str, suite_id: int, configuration: dict[str, Any]) -> None:
         from app.evals import runner as workflow_eval
 
-        cases = self.store.suite_cases(suite_id)
+        cases = self.store.run_case_snapshots(eval_run_id)
         if configuration.get("max_cases") is not None:
             cases = cases[: configuration["max_cases"]]
         passed = 0
         test_applicable = 0
         test_passed = 0
+        repair_attempts_total = 0
+        repair_applicable = 0
+        repair_successes = 0
         durations: list[float] = []
         for case in cases:
-            path = Path(case.input_json["case_path"])
+            path = Path(case["input_json"]["case_path"])
             started = perf_counter()
             try:
                 result = workflow_eval.run_eval_case(
                     path,
                     eval_run_id=eval_run_id,
-                    eval_case_id=case.id,
+                    eval_case_id=int(case["id"]),
                     usage_recorder=self.llm_usage_recorder,
                 )
                 duration_ms = round((perf_counter() - started) * 1000, 4)
@@ -283,22 +290,28 @@ class EvaluationService:
                     test_passed += 1 if tests_check.passed else 0
                 self.store.add_case_result(
                     eval_run_id=eval_run_id,
-                    eval_case_id=case.id,
+                    eval_case_id=int(case["id"]),
                     status=result.status,
                     output=result.model_dump(),
                     measurements={
                         "score": result.score,
                         "points_earned": result.points_earned,
                         "points_possible": result.points_possible,
+                        "repair_attempts": result.repair_attempts,
+                        "repair_succeeded": result.repair_succeeded,
                     },
                     duration_ms=duration_ms,
                 )
+                repair_attempts_total += result.repair_attempts
+                if result.repair_attempts > 0:
+                    repair_applicable += 1
+                    repair_successes += 1 if result.repair_succeeded else 0
             except Exception as exc:
                 duration_ms = round((perf_counter() - started) * 1000, 4)
                 durations.append(duration_ms)
                 self.store.add_case_result(
                     eval_run_id=eval_run_id,
-                    eval_case_id=case.id,
+                    eval_case_id=int(case["id"]),
                     status="error",
                     output={},
                     measurements={},
@@ -313,7 +326,8 @@ class EvaluationService:
             {
                 "task_success_rate": _rate(passed, total),
                 "test_pass_rate": _rate(test_passed, test_applicable) if test_applicable else None,
-                "repair_success_rate": None,
+                "repair_attempts_total": float(repair_attempts_total),
+                "repair_success_rate": _rate(repair_successes, repair_applicable) if repair_applicable else None,
                 "average_case_duration_ms": round(sum(durations) / len(durations), 4) if durations else None,
                 **usage,
             },

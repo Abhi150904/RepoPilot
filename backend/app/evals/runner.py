@@ -120,6 +120,8 @@ def evaluate_result(case: EvalCase, result: dict[str, object]) -> EvalCaseResult
         points_earned=points_earned,
         points_possible=points_possible,
         score=_score(points_earned, points_possible),
+        repair_attempts=_repair_attempts(result),
+        repair_succeeded=_repair_succeeded(result),
     )
 
 
@@ -204,6 +206,19 @@ def _check_forbidden_files(case: EvalCase, result: dict[str, object]) -> EvalChe
 def _run_summary(result: dict[str, object]) -> dict[str, object]:
     summary = result.get("run_summary")
     return summary if isinstance(summary, dict) else {}
+
+
+def _repair_attempts(result: dict[str, object]) -> int:
+    value = _run_summary(result).get("repair_attempts", result.get("repair_attempts"))
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _repair_succeeded(result: dict[str, object]) -> bool | None:
+    attempts = _repair_attempts(result)
+    if attempts == 0:
+        return None
+    summary = _run_summary(result)
+    return bool(summary.get("tests_passed")) and summary.get("status") in {"ready_for_review", "awaiting_approval", "approved"}
 
 
 def _modified_files(result: dict[str, object]) -> list[str]:

@@ -84,6 +84,10 @@ def create_app(
         settings=config,
         llm_usage_recorder=llm_usage_recorder,
     )
+
+    @api.on_event("startup")
+    def recover_interrupted_evaluations() -> None:
+        eval_service.recover_interrupted_runs()
     api_logger = logging.getLogger("repopilot.api")
 
     @api.middleware("http")
@@ -405,8 +409,8 @@ def create_app(
 
     @api.get("/evaluations/runs", response_model=list[EvaluationRunResponse])
     def list_evaluation_runs(request: Request) -> list[EvaluationRunResponse]:
-        _require_session(request, sessions, config)
-        return eval_service.list_runs()
+        session = _require_session(request, sessions, config)
+        return eval_service.list_runs(owner_key=_eval_owner_key(session))
 
     @api.get(
         "/evaluations/runs/{eval_run_id}",
@@ -414,8 +418,8 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
     )
     def get_evaluation_run(eval_run_id: str, request: Request) -> EvaluationRunResponse:
-        _require_session(request, sessions, config)
-        return eval_service.get_run(eval_run_id)
+        session = _require_session(request, sessions, config)
+        return eval_service.get_run(eval_run_id, owner_key=_eval_owner_key(session))
 
     @api.get(
         "/evaluations/runs/{eval_run_id}/cases",
@@ -423,8 +427,8 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
     )
     def get_evaluation_cases(eval_run_id: str, request: Request) -> list[EvaluationCaseResultResponse]:
-        _require_session(request, sessions, config)
-        return eval_service.get_run(eval_run_id).case_results
+        session = _require_session(request, sessions, config)
+        return eval_service.get_run(eval_run_id, owner_key=_eval_owner_key(session)).case_results
 
     @api.get(
         "/evaluations/runs/{eval_run_id}/metrics",
@@ -432,8 +436,8 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
     )
     def get_evaluation_metrics(eval_run_id: str, request: Request) -> list[EvaluationMetricResponse]:
-        _require_session(request, sessions, config)
-        return eval_service.get_run(eval_run_id).metrics
+        session = _require_session(request, sessions, config)
+        return eval_service.get_run(eval_run_id, owner_key=_eval_owner_key(session)).metrics
 
     @api.get(
         "/evaluations/compare",
@@ -441,8 +445,8 @@ def create_app(
         responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
     )
     def compare_evaluation_runs(run_ids: str, request: Request) -> EvaluationComparisonResponse:
-        _require_session(request, sessions, config)
-        return eval_service.compare([item.strip() for item in run_ids.split(",") if item.strip()])
+        session = _require_session(request, sessions, config)
+        return eval_service.compare([item.strip() for item in run_ids.split(",") if item.strip()], owner_key=_eval_owner_key(session))
 
     return api
 
@@ -649,8 +653,12 @@ def _actor_context(owner: RunOwner | None, session: AuthSession | None) -> dict[
 
 
 def _eval_idempotency_owner_key(session: AuthSession | None) -> str:
+    return _eval_owner_key(session) or "anonymous"
+
+
+def _eval_owner_key(session: AuthSession | None) -> str | None:
     if session is None:
-        return "anonymous"
+        return None
     return f"github:{session.user.github_user_id}"
 
 
