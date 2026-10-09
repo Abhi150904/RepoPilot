@@ -230,3 +230,79 @@ class PublishRequest(BaseModel):
 
 class MetricsResponse(BaseModel):
     metrics: dict[str, Any]
+
+
+class EvaluationSuiteResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    eval_type: Literal["retrieval", "workflow"]
+    version: str
+    created_at: datetime
+
+
+class EvaluationRunRequest(BaseModel):
+    suite: str
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    baseline_eval_run_id: str | None = None
+
+    @field_validator("suite")
+    @classmethod
+    def validate_suite(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("suite cannot be blank.")
+        return stripped
+
+
+class EvaluationMetricResponse(BaseModel):
+    metric_name: str
+    metric_value: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvaluationCaseResultResponse(BaseModel):
+    id: int
+    eval_run_id: str
+    eval_case_id: int
+    case_key: str
+    status: Literal["passed", "failed", "error"]
+    output: dict[str, Any] = Field(default_factory=dict)
+    measurements: dict[str, Any] = Field(default_factory=dict)
+    error_type: str | None = None
+    safe_error_message: str | None = None
+    duration_ms: float | None = None
+    created_at: datetime
+
+
+class EvaluationRunResponse(BaseModel):
+    id: str
+    suite_id: int
+    suite_name: str
+    eval_type: Literal["retrieval", "workflow"]
+    status: Literal["queued", "running", "completed", "failed", "interrupted"]
+    configuration: dict[str, Any] = Field(default_factory=dict)
+    metrics: list[EvaluationMetricResponse] = Field(default_factory=list)
+    case_results: list[EvaluationCaseResultResponse] = Field(default_factory=list)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime
+    created_by: str | None = None
+    error_type: str | None = None
+    safe_error_message: str | None = None
+
+
+class EvaluationComparisonMetric(BaseModel):
+    metric_name: str
+    baseline: float | None = None
+    current: float | None = None
+    delta: float | None = None
+    direction: Literal["higher_is_better", "lower_is_better", "neutral"] = "neutral"
+
+
+class EvaluationComparisonResponse(BaseModel):
+    baseline_run_id: str
+    current_run_id: str
+    compatible: bool
+    warning: str | None = None
+    metrics: list[EvaluationComparisonMetric]

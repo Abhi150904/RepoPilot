@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from types import SimpleNamespace
 
 from app.core.config import Settings
 from app.core.llm import GeminiLLMProvider, GroqLLMProvider, LLMProviderError, get_llm
+from app.core.llm_usage import LLMCallContext, LLMUsageRecorder, llm_call_context
 from app.schemas.code_change import SourceFile
 from app.schemas.issue import IssueAnalysis
 from app.schemas.plan import ImplementationPlan
@@ -566,6 +569,56 @@ def test_gemini_provider_records_usage_metadata(monkeypatch) -> None:
     assert provider.usage_events[0].prompt_tokens == 11
     assert provider.usage_events[0].output_tokens == 7
     assert provider.usage_events[0].total_tokens == 18
+    assert provider.usage_events[0].usage_source == "provider"
+
+
+def test_gemini_provider_persists_usage_when_context_is_active(monkeypatch) -> None:
+    def fake_post(url, params, json, timeout):
+        return _response(
+            200,
+            _gemini_payload_with_usage(
+                """
+                {
+                  "summary": "Login fails when email is missing.",
+                  "suspected_area": "authentication flow",
+                  "likely_cause": "Missing validation allows a bad request through.",
+                  "risk_level": "medium"
+                }
+                """
+            ),
+        )
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        future=True,
+    )
+    recorder = LLMUsageRecorder(engine=engine)
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiLLMProvider(
+        api_key="test-key",
+        model="gemini-3.7-flash",
+        role="analyzer",
+    )
+
+    with llm_call_context(
+        LLMCallContext(
+            run_id="run-1",
+            eval_run_id="eval-1",
+            eval_case_id=12,
+            request_id="request-1",
+            recorder=recorder,
+        )
+    ):
+        provider.analyze_issue("Login endpoint returns 500 when email is missing")
+
+    aggregate = recorder.aggregate(eval_run_id="eval-1")
+    assert aggregate["llm_call_count"] == 1
+    assert aggregate["prompt_tokens"] == 11
+    assert aggregate["completion_tokens"] == 7
+    assert aggregate["total_tokens"] == 18
+    assert aggregate["by_role"] == {"analyzer": {"calls": 1, "total_tokens": 18}}
 
 
 def test_gemini_provider_applies_output_and_prompt_caps(monkeypatch) -> None:

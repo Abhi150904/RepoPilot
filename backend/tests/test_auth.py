@@ -12,6 +12,7 @@ import app.services.run_service as service_module
 def _hosted_settings() -> Settings:
     return Settings(
         hosted_mode=True,
+        inline_run_execution=True,
         github_client_id="client-id",
         github_client_secret="client-secret",
         github_app_id="123",

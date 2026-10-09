@@ -20,8 +20,11 @@ from app.core.config import (
     get_settings,
     inline_run_execution_enabled,
 )
+from app.core.llm_usage import LLMUsageRecorder
 from app.evals import retrieval as retrieval_eval
 from app.evals import runner as eval_runner
+from app.evals.service import EvaluationService
+from app.evals.store import EvaluationStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
 
 
@@ -147,6 +150,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print worker result as JSON.",
     )
+    eval_once_parser = worker_subparsers.add_parser(
+        "eval-once",
+        help="Claim and execute one queued evaluation run, then exit.",
+    )
+    eval_once_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print eval worker result as JSON.",
+    )
     worker_run_parser = worker_subparsers.add_parser(
         "run",
         help="Continuously claim and execute queued runs.",
@@ -167,6 +179,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--json",
         action="store_true",
         help="Print worker result as JSON when the loop exits.",
+    )
+    eval_run_parser = worker_subparsers.add_parser(
+        "eval-run",
+        help="Continuously claim and execute queued evaluation runs.",
+    )
+    eval_run_parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=5.0,
+        help="Seconds to wait between empty eval queue polls.",
+    )
+    eval_run_parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=None,
+        help="Optional limit for controlled eval worker runs.",
+    )
+    eval_run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print eval worker result as JSON when the loop exits.",
     )
     _add_run_arguments(parser)
 
@@ -366,6 +399,12 @@ def _run_worker_command(args: argparse.Namespace) -> int:
         executed = _worker_run_once(worker)
         _print_worker_result(executed=executed, json_output=args.json)
         return 0
+    if args.worker_command == "eval-once":
+        worker = _persistent_eval_service()
+        worker.recover_interrupted_runs()
+        executed = _eval_worker_run_once(worker)
+        _print_eval_worker_result(executed=executed, json_output=args.json)
+        return 0
     if args.worker_command == "run":
         worker = _persistent_run_service()
         worker.recover_stale_runs()
@@ -375,6 +414,16 @@ def _run_worker_command(args: argparse.Namespace) -> int:
             service=worker,
         )
         _print_worker_result(executed=executed, json_output=args.json)
+        return 0
+    if args.worker_command == "eval-run":
+        worker = _persistent_eval_service()
+        worker.recover_interrupted_runs()
+        executed = _eval_worker_loop(
+            poll_interval=args.poll_interval,
+            max_runs=args.max_runs,
+            service=worker,
+        )
+        _print_eval_worker_result(executed=executed, json_output=args.json)
         return 0
     raise SystemExit(f"Unknown worker command: {args.worker_command}")
 
@@ -411,9 +460,42 @@ def _worker_loop(
     return executed
 
 
+def _eval_worker_run_once(service: EvaluationService | None = None):
+    worker = service or _persistent_eval_service()
+    return worker.execute_next_queued()
+
+
+def _eval_worker_loop(
+    *,
+    poll_interval: float,
+    max_runs: int | None,
+    service: EvaluationService | None = None,
+) -> list:
+    if poll_interval < 0:
+        raise SystemExit("--poll-interval cannot be negative.")
+    if max_runs is not None and max_runs < 1:
+        raise SystemExit("--max-runs must be at least 1.")
+
+    worker = service or _persistent_eval_service()
+    executed = []
+    try:
+        while max_runs is None or len(executed) < max_runs:
+            run = worker.execute_next_queued()
+            if run is None:
+                if max_runs is not None:
+                    break
+                time.sleep(poll_interval)
+                continue
+            executed.append(run)
+    except KeyboardInterrupt:
+        pass
+    return executed
+
+
 def _persistent_run_service() -> RepoPilotRunService:
     settings = get_settings()
     github_app = GitHubAppService(settings)
+    usage_recorder = LLMUsageRecorder(database_url=settings.database_url)
     return RepoPilotRunService(
         run_store=RunStore(database_url=settings.database_url),
         audit_logger=AuditLogger(database_url=settings.database_url),
@@ -422,6 +504,17 @@ def _persistent_run_service() -> RepoPilotRunService:
             if owner.installation_id is not None
             else None
         ),
+        llm_usage_recorder=usage_recorder,
+    )
+
+
+def _persistent_eval_service() -> EvaluationService:
+    settings = get_settings()
+    usage_recorder = LLMUsageRecorder(database_url=settings.database_url)
+    return EvaluationService(
+        store=EvaluationStore(database_url=settings.database_url),
+        settings=settings,
+        llm_usage_recorder=usage_recorder,
     )
 
 
@@ -454,6 +547,37 @@ def _print_worker_result(
         return
     for run in runs:
         print(f"Executed run {run.run_id}: {run.lifecycle_status}")
+
+
+def _print_eval_worker_result(
+    *,
+    executed,
+    json_output: bool,
+) -> None:
+    runs = executed if isinstance(executed, list) else ([executed] if executed is not None else [])
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "executed": len(runs),
+                    "eval_runs": [
+                        {
+                            "eval_run_id": run.id,
+                            "status": run.status,
+                            "suite": run.suite_name,
+                        }
+                        for run in runs
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+    if not runs:
+        print("No queued evaluation runs.")
+        return
+    for run in runs:
+        print(f"Executed evaluation run {run.id}: {run.status}")
 
 
 def _run_eval_command(args: argparse.Namespace) -> int:
@@ -552,6 +676,7 @@ def _config_report() -> dict[str, Any]:
         "worker": {
             "required": settings.hosted_mode,
             "command": "repopilot worker run",
+            "eval_command": "repopilot worker eval-run",
             "queue_configured": database_configured if settings.hosted_mode else True,
         },
         "inline_run_execution": {
@@ -592,6 +717,7 @@ def _print_config_report(report: dict[str, Any]) -> None:
     print(f"Inline run execution: {'enabled' if inline_execution.get('enabled') else 'disabled'}")
     if worker.get("required"):
         print(f"Worker command: {worker.get('command', 'unknown')}")
+        print(f"Eval worker command: {worker.get('eval_command', 'unknown')}")
     print(f"Workspace root: {report['workspace_root']}")
     print(f"Default test command: {report['default_test_command']}")
     cli_status = "available" if cli_install.get("available") else "missing"

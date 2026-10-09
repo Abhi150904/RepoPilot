@@ -124,14 +124,6 @@ export const publishModes = [
   { title: "Dry Run", label: "Validate only", icon: BadgeCheck }
 ];
 
-export const evalRows = [
-  { name: "Keyword", recall: "0.91", mrr: "0.74", precision: "0.62", hit: "94%" },
-  { name: "BM25", recall: "0.96", mrr: "0.81", precision: "0.68", hit: "97%" },
-  { name: "Vector", recall: "0.82", mrr: "0.69", precision: "0.54", hit: "88%" },
-  { name: "Hybrid", recall: "0.98", mrr: "0.88", precision: "0.73", hit: "99%" },
-  { name: "Reranker", recall: "0.98", mrr: "0.92", precision: "0.78", hit: "99%" }
-];
-
 export const failure = {
   passed: 17,
   failed: 2,

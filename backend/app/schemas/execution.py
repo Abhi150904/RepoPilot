@@ -40,6 +40,7 @@ class LLMUsageEvent(BaseModel):
     role: str
     provider: str
     model: str
+    usage_source: Literal["provider", "estimated", "unavailable"] = "unavailable"
     prompt_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
