@@ -20,6 +20,7 @@ from app.core.config import (
     get_settings,
     inline_run_execution_enabled,
 )
+from app.core.llm_usage import LLMUsageRecorder
 from app.evals import retrieval as retrieval_eval
 from app.evals import runner as eval_runner
 from app.evals.service import EvaluationService
@@ -494,6 +495,7 @@ def _eval_worker_loop(
 def _persistent_run_service() -> RepoPilotRunService:
     settings = get_settings()
     github_app = GitHubAppService(settings)
+    usage_recorder = LLMUsageRecorder(database_url=settings.database_url)
     return RepoPilotRunService(
         run_store=RunStore(database_url=settings.database_url),
         audit_logger=AuditLogger(database_url=settings.database_url),
@@ -502,14 +504,17 @@ def _persistent_run_service() -> RepoPilotRunService:
             if owner.installation_id is not None
             else None
         ),
+        llm_usage_recorder=usage_recorder,
     )
 
 
 def _persistent_eval_service() -> EvaluationService:
     settings = get_settings()
+    usage_recorder = LLMUsageRecorder(database_url=settings.database_url)
     return EvaluationService(
         store=EvaluationStore(database_url=settings.database_url),
         settings=settings,
+        llm_usage_recorder=usage_recorder,
     )
 
 

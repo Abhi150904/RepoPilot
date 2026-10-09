@@ -690,6 +690,72 @@ def test_cli_eval_worker_run_loop_respects_max_runs(monkeypatch, capsys) -> None
     assert "Executed evaluation run eval-2: completed" in output
 
 
+def test_persistent_run_worker_wires_usage_recorder(monkeypatch) -> None:
+    cli = importlib.import_module("app.cli")
+    captured = {}
+    settings = SimpleNamespace(database_url="postgresql+psycopg://example")
+
+    class FakeGitHubApp:
+        def __init__(self, settings):
+            captured["github_settings"] = settings
+
+    class FakeUsageRecorder:
+        def __init__(self, database_url):
+            captured["usage_database_url"] = database_url
+
+    class FakeRunStore:
+        def __init__(self, database_url):
+            captured["run_store_database_url"] = database_url
+
+    class FakeAuditLogger:
+        def __init__(self, database_url):
+            captured["audit_database_url"] = database_url
+
+    class FakeRunService:
+        def __init__(self, **kwargs):
+            captured["run_service_kwargs"] = kwargs
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "GitHubAppService", FakeGitHubApp)
+    monkeypatch.setattr(cli, "LLMUsageRecorder", FakeUsageRecorder)
+    monkeypatch.setattr(cli, "RunStore", FakeRunStore)
+    monkeypatch.setattr(cli, "AuditLogger", FakeAuditLogger)
+    monkeypatch.setattr(cli, "RepoPilotRunService", FakeRunService)
+
+    cli._persistent_run_service()
+
+    assert captured["usage_database_url"] == settings.database_url
+    assert isinstance(captured["run_service_kwargs"]["llm_usage_recorder"], FakeUsageRecorder)
+
+
+def test_persistent_eval_worker_wires_usage_recorder(monkeypatch) -> None:
+    cli = importlib.import_module("app.cli")
+    captured = {}
+    settings = SimpleNamespace(database_url="postgresql+psycopg://example")
+
+    class FakeUsageRecorder:
+        def __init__(self, database_url):
+            captured["usage_database_url"] = database_url
+
+    class FakeEvaluationStore:
+        def __init__(self, database_url):
+            captured["eval_store_database_url"] = database_url
+
+    class FakeEvaluationService:
+        def __init__(self, **kwargs):
+            captured["eval_service_kwargs"] = kwargs
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "LLMUsageRecorder", FakeUsageRecorder)
+    monkeypatch.setattr(cli, "EvaluationStore", FakeEvaluationStore)
+    monkeypatch.setattr(cli, "EvaluationService", FakeEvaluationService)
+
+    cli._persistent_eval_service()
+
+    assert captured["usage_database_url"] == settings.database_url
+    assert isinstance(captured["eval_service_kwargs"]["llm_usage_recorder"], FakeUsageRecorder)
+
+
 def test_cli_eval_workflow_prints_report(monkeypatch, capsys) -> None:
     cli = importlib.import_module("app.cli")
     eval_runner = importlib.import_module("app.evals.runner")
