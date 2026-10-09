@@ -105,11 +105,71 @@ def test_evaluation_restart_recovery_interrupts_running_runs() -> None:
         idempotency_key=None,
         idempotency_owner_key="owner-a",
     )
-    service.store.mark_running(created.run.id)
+    claimed = service.store.claim_next_queued(worker_id="worker-a", lease_seconds=-1)
+    assert claimed is not None
+    assert claimed.id == created.run.id
 
     assert service.recover_interrupted_runs() == 1
     recovered = service.get_run(created.run.id, owner_key="owner-a")
     assert recovered.status == "interrupted"
+
+
+def test_evaluation_restart_recovery_leaves_live_worker_runs_alone() -> None:
+    service = _service()
+    service.ensure_builtin_suites()
+    suite = service.store.suite_by_name("retrieval-core-v1")
+    assert suite is not None
+    created = service.store.create_run(
+        suite_id=suite.id,
+        configuration={},
+        created_by="test",
+        owner_key="owner-a",
+        idempotency_key=None,
+        idempotency_owner_key="owner-a",
+    )
+    claimed = service.store.claim_next_queued(worker_id="worker-a", lease_seconds=300)
+    assert claimed is not None
+
+    assert service.recover_interrupted_runs() == 0
+    assert service.get_run(created.run.id, owner_key="owner-a").status == "running"
+
+
+def test_evaluation_worker_claim_is_single_owner() -> None:
+    service = _service()
+    service.ensure_builtin_suites()
+    suite = service.store.suite_by_name("retrieval-core-v1")
+    assert suite is not None
+    service.store.create_run(
+        suite_id=suite.id,
+        configuration={},
+        created_by="test",
+        owner_key="owner-a",
+        idempotency_key=None,
+        idempotency_owner_key="owner-a",
+    )
+
+    first = service.store.claim_next_queued(worker_id="worker-a", lease_seconds=300)
+    second = service.store.claim_next_queued(worker_id="worker-b", lease_seconds=300)
+
+    assert first is not None
+    assert second is None
+    assert service.store.renew_run_lease(first.id, worker_id="worker-a", lease_seconds=300) is True
+    assert service.store.renew_run_lease(first.id, worker_id="worker-b", lease_seconds=300) is False
+
+
+def test_evaluation_create_can_queue_without_inline_execution() -> None:
+    service = _service()
+
+    created = service.create_and_run(
+        EvaluationRunRequest(suite="retrieval-core-v1", configuration={"strategy": "keyword", "top_k": 5}),
+        idempotency_owner_key="owner-a",
+        execute_inline=False,
+    )
+
+    assert created.status == "queued"
+    completed = service.execute_next_queued()
+    assert completed is not None
+    assert completed.status == "completed"
 
 
 def test_suite_versions_are_immutable() -> None:

@@ -398,14 +398,22 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
         responses={422: {"model": ErrorResponse}},
     )
-    def create_evaluation_run(request: EvaluationRunRequest, http_request: Request) -> EvaluationRunResponse:
+    def create_evaluation_run(
+        request: EvaluationRunRequest,
+        http_request: Request,
+        background_tasks: BackgroundTasks,
+    ) -> EvaluationRunResponse:
         session = _require_session(http_request, sessions, config, csrf=True)
-        return eval_service.create_and_run(
+        run = eval_service.create_and_run(
             request,
             created_by=_actor_for_session(session),
             idempotency_key=http_request.headers.get("Idempotency-Key"),
             idempotency_owner_key=_eval_idempotency_owner_key(session),
+            execute_inline=False,
         )
+        if run.status == "queued" and inline_run_execution_enabled(config):
+            background_tasks.add_task(eval_service.execute_next_queued)
+        return run
 
     @api.get("/evaluations/runs", response_model=list[EvaluationRunResponse])
     def list_evaluation_runs(request: Request) -> list[EvaluationRunResponse]:

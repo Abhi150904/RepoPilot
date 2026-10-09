@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any, Literal
@@ -77,6 +77,9 @@ class EvalRunRow(EvaluationBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     owner_key: Mapped[str] = mapped_column(String(255), nullable=False, default="anonymous")
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     safe_error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -265,16 +268,83 @@ class EvaluationStore:
             row.started_at = _now()
             session.commit()
 
-    def interrupt_running_runs(self) -> int:
+    def claim_next_queued(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int = 1800,
+    ) -> EvaluationRunResponse | None:
         now = _now()
+        with self._session_factory() as session:
+            statement = (
+                select(EvalRunRow)
+                .where(EvalRunRow.status == "queued")
+                .order_by(EvalRunRow.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            row = session.scalars(statement).first()
+            if row is None:
+                return None
+            row.status = "running"
+            row.started_at = now
+            row.worker_id = worker_id
+            row.last_heartbeat_at = now
+            row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            run_id = row.id
+            session.commit()
+            run = self.get_run(run_id)
+            if run is None:
+                raise KeyError(run_id)
+            return run
+
+    def renew_run_lease(
+        self,
+        eval_run_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 1800,
+    ) -> bool:
+        now = _now()
+        with self._session_factory() as session:
+            row = session.get(EvalRunRow, eval_run_id)
+            if row is None or row.status != "running" or row.worker_id != worker_id:
+                return False
+            row.last_heartbeat_at = now
+            row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            session.commit()
+            return True
+
+    def interrupt_running_runs(self) -> int:
+        return self.recover_stale_running_runs(reason="manual_recovery", stale_before=None)
+
+    def recover_stale_running_runs(
+        self,
+        *,
+        reason: str = "stale_eval_worker_lease",
+        stale_before: datetime | None = None,
+    ) -> int:
+        now = _now()
+        cutoff = stale_before or now
         count = 0
         with self._session_factory() as session:
-            rows = session.scalars(select(EvalRunRow).where(EvalRunRow.status == "running"))
+            if stale_before is None:
+                statement = select(EvalRunRow).where(
+                    EvalRunRow.status == "running",
+                    EvalRunRow.lease_expires_at.is_not(None),
+                    EvalRunRow.lease_expires_at < cutoff,
+                )
+            else:
+                statement = select(EvalRunRow).where(EvalRunRow.status == "running")
+            rows = session.scalars(statement)
             for row in rows:
                 row.status = "interrupted"
                 row.completed_at = now
+                row.worker_id = None
+                row.lease_expires_at = None
+                row.last_heartbeat_at = None
                 row.error_type = "Interrupted"
-                row.safe_error_message = "Evaluation was interrupted before completion. Start a new evaluation run to retry."
+                row.safe_error_message = f"Evaluation was interrupted before completion ({reason}). Start a new evaluation run to retry."
                 count += 1
             session.commit()
         return count
@@ -287,6 +357,9 @@ class EvaluationStore:
                 raise KeyError(eval_run_id)
             row.status = "completed"
             row.completed_at = now
+            row.worker_id = None
+            row.lease_expires_at = None
+            row.last_heartbeat_at = None
             for name, value in metrics.items():
                 session.add(EvalMetricRow(eval_run_id=eval_run_id, metric_name=name, metric_value=value, metadata_json={}))
             session.commit()
@@ -298,6 +371,9 @@ class EvaluationStore:
                 raise KeyError(eval_run_id)
             row.status = "failed"
             row.completed_at = _now()
+            row.worker_id = None
+            row.lease_expires_at = None
+            row.last_heartbeat_at = None
             row.error_type = exc.__class__.__name__
             row.safe_error_message = _safe_error_message(exc)
             session.commit()

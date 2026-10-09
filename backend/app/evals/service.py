@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from threading import Event, Thread
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Callable, Literal
+from uuid import uuid4
 
 from app.api.schemas import (
     EvaluationComparisonMetric,
@@ -24,6 +27,9 @@ from app.evals.retrieval import (
 from app.evals.store import EvaluationConflict, EvaluationStore
 
 
+logger = logging.getLogger(__name__)
+
+
 class EvaluationServiceError(Exception):
     def __init__(self, *, status_code: int, code: str, message: str) -> None:
         super().__init__(message)
@@ -39,10 +45,15 @@ class EvaluationService:
         store: EvaluationStore,
         settings: Settings,
         llm_usage_recorder: LLMUsageRecorderProtocol | None = None,
+        lease_seconds: int = 1800,
+        heartbeat_interval_seconds: float = 60.0,
     ) -> None:
         self.store = store
         self.settings = settings
         self.llm_usage_recorder = llm_usage_recorder
+        self._worker_id = uuid4().hex
+        self._lease_seconds = lease_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def ensure_builtin_suites(self) -> None:
         retrieval = load_retrieval_benchmark(DEFAULT_BENCHMARK_PATH)
@@ -89,7 +100,7 @@ class EvaluationService:
         return self.store.list_suites()
 
     def recover_interrupted_runs(self) -> int:
-        return self.store.interrupt_running_runs()
+        return self.store.recover_stale_running_runs()
 
     def create_and_run(
         self,
@@ -98,6 +109,7 @@ class EvaluationService:
         created_by: str | None = None,
         idempotency_key: str | None = None,
         idempotency_owner_key: str = "anonymous",
+        execute_inline: bool = True,
     ) -> EvaluationRunResponse:
         self.ensure_builtin_suites()
         suite = self.store.suite_by_name(request.suite)
@@ -122,20 +134,83 @@ class EvaluationService:
         if not created.created:
             return created.run
         eval_run_id = created.run.id
+        if not execute_inline:
+            run = self.store.get_run(eval_run_id, owner_key=idempotency_owner_key)
+            if run is None:
+                raise EvaluationServiceError(status_code=404, code="eval_run_not_found", message="Evaluation run not found.")
+            return run
         self.store.mark_running(eval_run_id)
         try:
-            if suite.eval_type == "retrieval":
-                self._run_retrieval_suite(eval_run_id, suite.id, configuration)
-            elif suite.eval_type == "workflow":
-                self._run_workflow_suite(eval_run_id, suite.id, configuration)
-            else:
-                raise ValueError(f"Unsupported eval type: {suite.eval_type}")
+            self._execute_run(eval_run_id, suite.id, suite.eval_type, configuration)
         except Exception as exc:
             self.store.fail_run(eval_run_id, exc)
         run = self.store.get_run(eval_run_id)
         if run is None:
             raise EvaluationServiceError(status_code=404, code="eval_run_not_found", message="Evaluation run not found.")
         return run
+
+    def execute_next_queued(self) -> EvaluationRunResponse | None:
+        run = self.store.claim_next_queued(
+            worker_id=self._worker_id,
+            lease_seconds=self._lease_seconds,
+        )
+        if run is None:
+            return None
+        self._execute_claimed_run(run)
+        return self.store.get_run(run.id)
+
+    def _execute_claimed_run(self, run: EvaluationRunResponse) -> None:
+        stop_heartbeat = self._start_lease_heartbeat(run.id)
+        try:
+            self._execute_run(run.id, run.suite_id, run.eval_type, run.configuration)
+        except Exception as exc:
+            logger.exception("RepoPilot evaluation failed: eval_run_id=%s error_type=%s", run.id, exc.__class__.__name__)
+            self.store.fail_run(run.id, exc)
+        finally:
+            stop_heartbeat()
+
+    def _start_lease_heartbeat(self, eval_run_id: str) -> Callable[[], None]:
+        interval = self._heartbeat_interval_seconds
+        if interval <= 0:
+            return lambda: None
+        stop = Event()
+
+        def beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    renewed = self.store.renew_run_lease(
+                        eval_run_id,
+                        worker_id=self._worker_id,
+                        lease_seconds=self._lease_seconds,
+                    )
+                except Exception:
+                    logger.exception("RepoPilot evaluation lease heartbeat failed: eval_run_id=%s", eval_run_id)
+                    continue
+                if not renewed:
+                    return
+
+        thread = Thread(target=beat, name=f"repopilot-eval-heartbeat-{eval_run_id[:8]}", daemon=True)
+        thread.start()
+
+        def stop_thread() -> None:
+            stop.set()
+            thread.join(timeout=1)
+
+        return stop_thread
+
+    def _execute_run(
+        self,
+        eval_run_id: str,
+        suite_id: int,
+        eval_type: str,
+        configuration: dict[str, Any],
+    ) -> None:
+        if eval_type == "retrieval":
+            self._run_retrieval_suite(eval_run_id, suite_id, configuration)
+        elif eval_type == "workflow":
+            self._run_workflow_suite(eval_run_id, suite_id, configuration)
+        else:
+            raise ValueError(f"Unsupported eval type: {eval_type}")
 
     def list_runs(self, *, owner_key: str | None = None) -> list[EvaluationRunResponse]:
         self.ensure_builtin_suites()
