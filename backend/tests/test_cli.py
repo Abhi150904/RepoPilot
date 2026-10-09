@@ -446,6 +446,7 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
     assert body["worker"] == {
         "required": False,
         "command": "repopilot worker run",
+        "eval_command": "repopilot worker eval-run",
         "queue_configured": True,
     }
     assert body["inline_run_execution"] == {
@@ -478,6 +479,7 @@ def test_cli_config_validate_reports_hosted_worker_shape(monkeypatch, capsys) ->
     assert body["worker"] == {
         "required": True,
         "command": "repopilot worker run",
+        "eval_command": "repopilot worker eval-run",
         "queue_configured": True,
     }
     assert body["inline_run_execution"] == {
@@ -627,6 +629,65 @@ def test_cli_worker_run_loop_respects_max_runs(monkeypatch, capsys) -> None:
     assert calls["count"] == 2
     assert "Executed run run-1: completed" in output
     assert "Executed run run-2: completed" in output
+
+
+def test_cli_eval_worker_run_once_claims_one_eval(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+
+    class FakeService:
+        def recover_interrupted_runs(self):
+            return 0
+
+        def execute_next_queued(self):
+            return SimpleNamespace(
+                id="eval-1",
+                status="completed",
+                suite_name="retrieval-core-v1",
+            )
+
+    monkeypatch.setattr(cli, "_persistent_eval_service", lambda: FakeService())
+
+    exit_code = cli.main(["worker", "eval-once", "--json"])
+
+    body = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert body == {
+        "executed": 1,
+        "eval_runs": [
+            {
+                "eval_run_id": "eval-1",
+                "status": "completed",
+                "suite": "retrieval-core-v1",
+            }
+        ],
+    }
+
+
+def test_cli_eval_worker_run_loop_respects_max_runs(monkeypatch, capsys) -> None:
+    cli = importlib.import_module("app.cli")
+    calls = {"count": 0}
+
+    class FakeService:
+        def recover_interrupted_runs(self):
+            return 0
+
+        def execute_next_queued(self):
+            calls["count"] += 1
+            return SimpleNamespace(
+                id=f"eval-{calls['count']}",
+                status="completed",
+                suite_name="retrieval-core-v1",
+            )
+
+    monkeypatch.setattr(cli, "_persistent_eval_service", lambda: FakeService())
+
+    exit_code = cli.main(["worker", "eval-run", "--max-runs", "2"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert calls["count"] == 2
+    assert "Executed evaluation run eval-1: completed" in output
+    assert "Executed evaluation run eval-2: completed" in output
 
 
 def test_cli_eval_workflow_prints_report(monkeypatch, capsys) -> None:
