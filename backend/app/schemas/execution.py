@@ -16,7 +16,7 @@ class TestResult(BaseModel):
 
 
 class TestAnalysis(BaseModel):
-    status: Literal["passed", "failed", "timed_out", "error"]
+    status: Literal["passed", "failed", "timed_out", "error", "unavailable"]
     summary: str
     failure_reason: str | None = None
     next_action: Literal["ready_for_review", "inspect_failure", "rerun_tests"]
@@ -30,7 +30,7 @@ class RepairDecision(BaseModel):
 
 class RepairContext(BaseModel):
     attempt: int
-    test_status: Literal["failed", "timed_out", "error"]
+    test_status: Literal["failed", "timed_out", "error", "unavailable"]
     test_summary: str
     failure_reason: str | None = None
     previous_diff: str = ""
@@ -43,6 +43,7 @@ class LLMUsageEvent(BaseModel):
     usage_source: Literal["provider", "estimated", "unavailable"] = "unavailable"
     prompt_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning_tokens: int | None = None
     total_tokens: int | None = None
     estimated_cost_usd: float | None = None
     duration_ms: float | None = None
@@ -61,9 +62,9 @@ class StageTiming(BaseModel):
 
 class RunMetrics(BaseModel):
     llm_calls: list[LLMUsageEvent] = Field(default_factory=list)
-    prompt_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
+    prompt_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
     estimated_cost_usd: float | None = None
     llm_call_count: int = 0
     retries: int = 0

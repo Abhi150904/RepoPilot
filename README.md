@@ -248,16 +248,65 @@ Create or edit `.env` in the project root if you want to override configuration.
 Useful environment variables:
 
 ```text
-REPO_PILOT_LLM_PROVIDER=gemini
-REPO_PILOT_LLM_MODEL=gemini-3.7-pro
-GEMINI_API_KEY=...
+REPO_PILOT_LLM_PROVIDER=openai
+REPO_PILOT_LLM_MODEL=gpt-5.4-mini
+OPENAI_API_KEY=...
+REPO_PILOT_LLM_MAX_OUTPUT_TOKENS=8192
+REPO_PILOT_LLM_MAX_PROMPT_CHARS=60000
+REPO_PILOT_LLM_MAX_RETRIES=2
+REPOPILOT_LLM_BUDGET_USD=5
+REPOPILOT_LLM_RUN_BUDGET_USD=0.50
+REPOPILOT_LLM_BUDGET_PATH=.repopilot/openai-budget.sqlite
 GITHUB_TOKEN=...
 REPO_PILOT_DEFAULT_TEST_COMMAND=python -m pytest
 ```
 
 Set `GITHUB_TOKEN` when you want higher rate limits, need access to private repositories, or want RepoPilot to push branches and open pull requests.
 
+Only `openai` and `mock` model providers are supported. OpenAI uses the Responses API
+with strict JSON schemas. The default model is `gpt-5.4-mini`; per-role model
+overrides remain available, but the spending guard rejects models without a
+verified entry in `backend/app/core/pricing.py`.
+
+The local spending ledger reserves a conservative input estimate plus the maximum
+output cost before every API attempt, then replaces that reservation with reported
+usage cost. Output usage includes reasoning tokens. Requests that time out or lack
+usage retain their reservation. Failed attempts are included in usage records;
+unknown usage remains unknown rather than becoming zero. Rate-limit and transient
+server errors retry with bounded waits; quota errors, refusals, and incomplete
+responses stop safely.
+
+The default limits are $5 total per API key and $0.50 per run, across local processes
+sharing the same ledger file. This is a conservative RepoPilot guard, not an OpenAI
+billing limit: it cannot see usage from another app or another machine, and deleting
+the ledger resets its history. Keep the ledger outside source repositories and use
+the same absolute path across workers. Unknown network outcomes can consume the
+local allowance even if no charge occurred. No live API calls are needed for tests.
+
+Source files are never silently truncated before whole-file replacement. Oversized
+prompts stop before making a paid request; narrow the selected files or deliberately
+increase the prompt limit.
+
 ## CLI Usage
+
+### Hosted demo scope
+
+The public web app includes Command Center, Runs, Repositories, and Settings.
+Evaluations are CLI-only; `/evaluations/*` API endpoints and the frontend page
+are not exposed. Existing evaluation records are preserved in storage, and
+private evaluation workers can finish jobs already queued there.
+
+Hosted run creation is limited per authenticated GitHub user, across all
+repositories: `REPOPILOT_USER_MAX_ACTIVE_RUNS=1` queued/running job and
+`REPOPILOT_USER_MAX_DAILY_RUNS=5` new runs in a rolling 24-hour window.
+All admitted runs count toward the window, including failures. Replays with the
+same Idempotency-Key and payload return the original run without consuming
+another slot. Limits are checked transactionally in PostgreSQL or SQLite;
+they do not apply to local CLI runs. The existing global and per-run LLM budget
+caps remain in effect. These controls are not payment credits.
+
+Run benchmarks privately with `repopilot eval retrieval` or
+`repopilot eval workflow`; append `--json` for machine-readable results.
 
 The product CLI is:
 

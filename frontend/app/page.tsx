@@ -1,13 +1,8 @@
 import { ArrowDown, ArrowRight, Github } from "lucide-react";
 import { RepoPilotLogo } from "@/components/repopilot-logo";
+import { githubLoginUrl } from "@/lib/api";
 
 const workflow = ["Issue", "Analyze", "Retrieve", "Plan", "Code", "Test", "Review", "Approval", "PR"];
-const evaluationSignals = [
-  ["Task success", "Whether the run reaches a useful reviewed outcome for the issue."],
-  ["Test pass rate", "How often generated changes pass the configured project tests."],
-  ["Repair success", "Whether RepoPilot can fix failures after test or review feedback."],
-  ["Retrieval quality", "How well the selected files match the issue being solved."]
-];
 
 export default function LandingPage() {
   return (
@@ -31,7 +26,7 @@ export default function LandingPage() {
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <a
-              href="/app"
+              href={githubLoginUrl()}
               className="inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border border-cyan-100 bg-cyan-300/15 px-5 text-base font-semibold text-white shadow-[0_0_36px_rgba(56,189,248,0.38)] transition hover:bg-cyan-300/25"
             >
               Start RepoPilot
@@ -54,7 +49,7 @@ export default function LandingPage() {
         {[
           ["Workflow", "Issue intake, repository retrieval, planning, implementation and test feedback in one controlled path."],
           ["Human control", "Approval is explicit. Publication waits for a reviewed, bound artifact."],
-          ["Evaluation", "Workflow and retrieval metrics keep the agent measurable instead of merely impressive."]
+          ["Verification", "Project tests and automated review provide evidence before you approve changes."]
         ].map(([title, copy]) => (
           <article key={title} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
             <h2 className="font-display text-lg font-semibold">{title}</h2>
@@ -69,23 +64,6 @@ export default function LandingPage() {
           <p className="mt-4 max-w-2xl text-[var(--text-secondary)]">
             RepoPilot is built around engineering controls: review evidence, test status, artifact binding and publication choices.
           </p>
-        </div>
-      </section>
-      <section id="evaluations" className="mx-auto max-w-6xl px-6 py-16">
-        <div className="mb-5 max-w-2xl">
-          <p className="font-display text-xs uppercase text-cyan-300">Evaluation signals</p>
-          <h2 className="mt-2 font-display text-2xl font-semibold">What RepoPilot measures</h2>
-          <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-            These are not buttons. They are the quality signals used to judge whether the agent is improving.
-          </p>
-        </div>
-        <div className="grid gap-4 md:grid-cols-4">
-          {evaluationSignals.map(([title, copy]) => (
-            <div key={title} className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
-              <span className="font-display text-sm text-[var(--text-primary)]">{title}</span>
-              <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{copy}</p>
-            </div>
-          ))}
         </div>
       </section>
       <footer className="mx-auto max-w-6xl border-t border-[var(--border)] px-6 py-8 text-sm text-[var(--text-secondary)]">

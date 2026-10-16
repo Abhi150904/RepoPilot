@@ -83,66 +83,6 @@ export type RunEvent = {
   metadata?: Record<string, unknown>;
 };
 
-export type EvaluationSuite = {
-  id: number;
-  name: string;
-  description?: string | null;
-  eval_type: "retrieval" | "workflow";
-  version: string;
-  created_at: string;
-};
-
-export type EvaluationMetric = {
-  metric_name: string;
-  metric_value?: number | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type EvaluationCaseResult = {
-  id: number;
-  eval_run_id: string;
-  eval_case_id: number;
-  case_key: string;
-  status: "passed" | "failed" | "error";
-  output: Record<string, unknown>;
-  measurements: Record<string, unknown>;
-  error_type?: string | null;
-  safe_error_message?: string | null;
-  duration_ms?: number | null;
-  created_at: string;
-};
-
-export type EvaluationRun = {
-  id: string;
-  suite_id: number;
-  suite_name: string;
-  eval_type: "retrieval" | "workflow";
-  status: "queued" | "running" | "completed" | "failed" | "interrupted";
-  configuration: Record<string, unknown>;
-  metrics: EvaluationMetric[];
-  case_results: EvaluationCaseResult[];
-  started_at?: string | null;
-  completed_at?: string | null;
-  created_at: string;
-  created_by?: string | null;
-  error_type?: string | null;
-  safe_error_message?: string | null;
-};
-
-export type EvaluationComparison = {
-  baseline_run_id: string;
-  current_run_id: string;
-  compatible: boolean;
-  warning?: string | null;
-  metrics: Array<{
-    metric_name: string;
-    baseline?: number | null;
-    current?: number | null;
-    delta?: number | null;
-    direction: "higher_is_better" | "lower_is_better" | "neutral";
-  }>;
-};
-
 export class RepoPilotApiError extends Error {
   code: string;
   status: number;
@@ -186,8 +126,8 @@ export async function createRun(request: RunRequest): Promise<RunStatusResponse>
   });
 }
 
-export async function listRuns(): Promise<RunStatusResponse[]> {
-  return apiFetch<RunStatusResponse[]>("/runs");
+export async function listRuns(signal?: AbortSignal): Promise<RunStatusResponse[]> {
+  return apiFetch<RunStatusResponse[]>("/runs", { signal, cache: "no-store" });
 }
 
 export async function getHealth(): Promise<HealthResponse> {
@@ -202,8 +142,8 @@ export async function getGitHubRepositories(): Promise<GitHubRepositoriesRespons
   return apiFetch<GitHubRepositoriesResponse>("/github/repositories");
 }
 
-export async function getRun(runId: string): Promise<RunStatusResponse> {
-  return apiFetch<RunStatusResponse>(`/runs/${runId}`);
+export async function getRun(runId: string, signal?: AbortSignal): Promise<RunStatusResponse> {
+  return apiFetch<RunStatusResponse>(`/runs/${runId}`, { signal, cache: "no-store" });
 }
 
 export async function approveRun(runId: string): Promise<RunStatusResponse> {
@@ -228,32 +168,6 @@ export async function publishRun(
     method: "POST",
     body: JSON.stringify({ mode })
   });
-}
-
-export async function listEvaluationSuites(): Promise<EvaluationSuite[]> {
-  return apiFetch<EvaluationSuite[]>("/evaluations/suites");
-}
-
-export async function listEvaluationRuns(): Promise<EvaluationRun[]> {
-  return apiFetch<EvaluationRun[]>("/evaluations/runs");
-}
-
-export async function getEvaluationRun(evalRunId: string): Promise<EvaluationRun> {
-  return apiFetch<EvaluationRun>(`/evaluations/runs/${evalRunId}`);
-}
-
-export async function createEvaluationRun(request: {
-  suite: string;
-  configuration?: Record<string, unknown>;
-}): Promise<EvaluationRun> {
-  return apiFetch<EvaluationRun>("/evaluations/runs", {
-    method: "POST",
-    body: JSON.stringify({ configuration: {}, ...request })
-  });
-}
-
-export async function compareEvaluationRuns(runIds: string[]): Promise<EvaluationComparison> {
-  return apiFetch<EvaluationComparison>(`/evaluations/compare?run_ids=${encodeURIComponent(runIds.join(","))}`);
 }
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {

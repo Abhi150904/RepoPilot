@@ -150,6 +150,16 @@ def _summarize_tested_run(
             next_action="rerun_tests",
         )
 
+    if analysis.status == "unavailable":
+        return RunSummary(
+            status="needs_human",
+            summary="Automated verification is unavailable for this repository.",
+            tests_passed=None,
+            repair_attempts=repair_attempts,
+            metrics=metrics,
+            next_action="inspect_failure",
+        )
+
     return RunSummary(
         status="needs_human",
         summary="The test command timed out and needs human inspection.",

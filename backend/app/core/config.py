@@ -13,11 +13,10 @@ class Settings(BaseSettings):
         ),
     )
     llm_model: str = Field(
-        default="repopilot-mock-v0",
+        default="gpt-5.4-mini",
         validation_alias=AliasChoices(
             "REPO_PILOT_LLM_MODEL",
             "REPOPILOT_LLM_MODEL",
-            "GEMINI_MODEL",
         ),
     )
     analyzer_model: str | None = Field(
@@ -56,7 +55,7 @@ class Settings(BaseSettings):
         ),
     )
     llm_max_prompt_chars: int = Field(
-        default=120_000,
+        default=60_000,
         validation_alias=AliasChoices(
             "REPO_PILOT_LLM_MAX_PROMPT_CHARS",
             "REPOPILOT_LLM_MAX_PROMPT_CHARS",
@@ -69,22 +68,19 @@ class Settings(BaseSettings):
             "REPOPILOT_LLM_MAX_RETRIES",
         ),
     )
-    gemini_api_key: str | None = Field(
+    openai_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
-            "GEMINI_API_KEY",
-            "REPO_PILOT_GEMINI_API_KEY",
-            "REPOPILOT_GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+            "REPO_PILOT_OPENAI_API_KEY",
+            "REPOPILOT_OPENAI_API_KEY",
         ),
     )
-    groq_api_key: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "GROQ_API_KEY",
-            "REPO_PILOT_GROQ_API_KEY",
-            "REPOPILOT_GROQ_API_KEY",
-        ),
-    )
+    llm_budget_usd: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    llm_run_budget_usd: float = Field(default=0.50, gt=0, allow_inf_nan=False)
+    llm_budget_path: str = ".repopilot/openai-budget.sqlite"
+    user_max_active_runs: int = Field(default=1, ge=1)
+    user_max_daily_runs: int = Field(default=5, ge=1)
     github_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("GITHUB_TOKEN", "REPOPILOT_GITHUB_TOKEN"),
@@ -264,7 +260,10 @@ def readiness_report(settings: Settings) -> dict[str, object]:
     database_configured = bool(settings.database_url) if settings.hosted_mode else True
     checks = {
         "cors_configured": bool(_cors_origins(settings.cors_origins)),
-        "llm_provider_configured": bool(settings.llm_provider),
+        "llm_provider_configured": (
+            settings.llm_provider.lower() == "mock"
+            or (settings.llm_provider.lower() == "openai" and bool(settings.openai_api_key))
+        ),
         "workspace_root_configured": bool(settings.workspace_root),
         "database_configured": database_configured,
         "worker_queue_configured": database_configured,

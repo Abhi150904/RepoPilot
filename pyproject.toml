@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 repopilot = "app.cli:main"
+repopilot-api-dev = "app.dev_server:main"
 
 [project.optional-dependencies]
 dev = [

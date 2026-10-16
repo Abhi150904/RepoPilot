@@ -31,6 +31,7 @@ describe("buildRunView", () => {
           diff: "+new line\n-old line\n unchanged",
           test_analysis: { status: "passed", summary: "26 tests passed." },
           review_result: { status: "approved" },
+          run_metrics: { total_tokens: 8732 },
           approval_decision: { approved: true },
           approval_binding: {
             status: "bound",
@@ -58,7 +59,7 @@ describe("buildRunView", () => {
     expect(view.planSteps).toEqual(["Add validation", "Add regression test"]);
     expect(view.diffStats).toBe("+1 -1");
     expect(view.tests.label).toBe("passed");
-    expect(view.review.confidence).toBe("n/a");
+    expect(view.review.status).toBe("Passed");
     expect(view.tokens).toBe("6.4k");
     expect(view.verification.every((item) => item.verified)).toBe(true);
     expect(view.publish.prUrl).toBe("https://github.com/example/demo/pull/1");
@@ -106,7 +107,7 @@ describe("buildRunView", () => {
     expect(view.diffFile).toBe("No changed files");
     expect(view.diffStats).toBe("+0 -0");
     expect(view.diffLines[0].text).toBe("No diff was generated for this run.");
-    expect(view.review.confidence).toBe("n/a");
+    expect(view.review.status).toBe("Not run");
     expect(view.publish.status).toBe("Locked");
   });
 
@@ -275,5 +276,39 @@ describe("buildRunView", () => {
     expect(view.timeline[0].detail).toBe("Request abcdef12");
     expect(view.timeline[5].detail).toBe("Mode: Dry run");
     expect(view.timeline.every((item) => item.state === "complete")).toBe(true);
+  });
+
+  it("reads backend run metric token totals for run intelligence", () => {
+    const run: RunStatusResponse = {
+      run_id: "run-metrics",
+      lifecycle_status: "completed",
+      request: { repository: "example/demo", issue_number: 12 },
+      error: null,
+      response: {
+        status: "ready_for_review",
+        next_action: "approve_changes",
+        summary: "Ready for approval.",
+        run_summary: {
+          status: "ready_for_review",
+          summary: "Ready for approval.",
+          next_action: "approve_changes",
+          tests_passed: true,
+          repair_attempts: 0
+        },
+        result: {
+          repository: "example/demo",
+          issue_number: 12,
+          review_result: { status: "approved" },
+          run_metrics: {
+            total_tokens: 12_345
+          }
+        }
+      }
+    };
+
+    const view = buildRunView(run);
+
+    expect(view.review.status).toBe("Passed");
+    expect(view.tokens).toBe("12.3k");
   });
 });

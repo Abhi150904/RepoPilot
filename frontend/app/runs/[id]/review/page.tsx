@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { ReviewPanel } from "@/components/run-panels";
+import { ButtonLink } from "@/components/button";
 import { approveRun, getRun, publishRun, rejectRun, type PublishMode, type RunStatusResponse } from "@/lib/api";
 import { buildRunView } from "@/lib/run-view-model";
 
@@ -12,6 +13,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [busy, setBusy] = useState(false);
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const view = useMemo(() => buildRunView(run), [run]);
+  const canApprove = run?.lifecycle_status === "completed" && view.tests.passed === true && view.review.blockers === 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -57,15 +59,30 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     <AppShell>
       <div className="grid gap-4">
         {error ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">{error}</p> : null}
-        <ReviewPanel
-          run={run}
-          view={view}
-          isBusy={busy}
-          activeAction={activeAction}
-          onApprove={() => mutate("approve")}
-          onReject={() => mutate("reject")}
-          onPublish={(mode) => mutate(mode)}
-        />
+        {run && !canApprove ? (
+          <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6">
+            <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Human review</p>
+            <h1 className="mt-3 font-display text-3xl font-semibold">Approval is blocked.</h1>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
+              {view.tests.passed === false
+                ? view.tests.summary
+                : "RepoPilot did not produce a passing review package for this run."}
+            </p>
+            <div className="mt-5">
+              <ButtonLink href={`/runs/${params.id}`} variant="primary">Inspect run</ButtonLink>
+            </div>
+          </section>
+        ) : (
+          <ReviewPanel
+            run={run}
+            view={view}
+            isBusy={busy}
+            activeAction={activeAction}
+            onApprove={() => mutate("approve")}
+            onReject={() => mutate("reject")}
+            onPublish={(mode) => mutate(mode)}
+          />
+        )}
       </div>
     </AppShell>
   );

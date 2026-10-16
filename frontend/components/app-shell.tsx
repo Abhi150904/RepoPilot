@@ -6,7 +6,6 @@ import { useEffect, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import {
-  Braces,
   Command,
   Github,
   GitBranch,
@@ -26,7 +25,6 @@ const navItems = [
   { href: "/app", label: "Command Center", icon: Home },
   { href: "/runs", label: "Runs", icon: ListChecks },
   { href: "/repositories", label: "Repositories", icon: GitBranch },
-  { href: "/evaluations", label: "Evaluations", icon: Braces },
   { href: "/settings", label: "Settings", icon: Settings }
 ];
 

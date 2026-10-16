@@ -19,12 +19,6 @@ from app.api.schemas import (
     AuthMeResponse,
     AuthUser,
     ErrorResponse,
-    EvaluationComparisonResponse,
-    EvaluationCaseResultResponse,
-    EvaluationMetricResponse,
-    EvaluationRunRequest,
-    EvaluationRunResponse,
-    EvaluationSuiteResponse,
     GitHubInstallationResponse,
     GitHubRepositoriesResponse,
     GitHubRepositoryResponse,
@@ -41,9 +35,7 @@ from app.api.schemas import (
 from app.core.config import Settings, get_settings, inline_run_execution_enabled, readiness_report
 from app.core.audit import AuditLogger
 from app.core.llm_usage import LLMUsageRecorder
-from app.api.runs import RunStore
-from app.evals.service import EvaluationService, EvaluationServiceError
-from app.evals.store import EvaluationStore
+from app.api.runs import RunLimits, RunStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
 
 
@@ -53,7 +45,6 @@ def create_app(
     session_store: InMemorySessionStore | None = None,
     oauth_client: GitHubOAuthClient | None = None,
     github_app_service: GitHubAppService | None = None,
-    evaluation_service: EvaluationService | None = None,
 ) -> FastAPI:
     config = settings or get_settings()
     api = FastAPI(title="RepoPilot API", version="0.1.0")
@@ -79,15 +70,6 @@ def create_app(
         )
     )
     repository_authorizer = RepositoryAuthorizationService(github_app)
-    eval_service = evaluation_service or EvaluationService(
-        store=EvaluationStore(database_url=config.database_url),
-        settings=config,
-        llm_usage_recorder=llm_usage_recorder,
-    )
-
-    @api.on_event("startup")
-    def recover_interrupted_evaluations() -> None:
-        eval_service.recover_interrupted_runs()
     api_logger = logging.getLogger("repopilot.api")
 
     @api.middleware("http")
@@ -126,18 +108,6 @@ def create_app(
     def run_service_exception_handler(
         request: Request,
         exc: RunServiceError,
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=exc.status_code,
-            error_type=exc.code,
-            message=exc.message,
-            request_id=_request_id(request),
-        )
-
-    @api.exception_handler(EvaluationServiceError)
-    def evaluation_service_exception_handler(
-        request: Request,
-        exc: EvaluationServiceError,
     ) -> JSONResponse:
         return _error_response(
             status_code=exc.status_code,
@@ -217,7 +187,10 @@ def create_app(
         )
 
     @api.get("/auth/github/login")
-    def github_login() -> RedirectResponse:
+    def github_login(request: Request) -> RedirectResponse:
+        if _optional_session(request, sessions) is not None:
+            redirect_url = f"{config.public_base_url}/app" if config.public_base_url else "/app"
+            return RedirectResponse(redirect_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
         state = sessions.create_oauth_state()
         response = RedirectResponse(oauth.login_url(state=state), status_code=status.HTTP_307_TEMPORARY_REDIRECT)
         response.set_cookie(
@@ -320,6 +293,10 @@ def create_app(
             request_id=_request_id(http_request),
             owner=owner,
             idempotency_key=http_request.headers.get("Idempotency-Key"),
+            limits=RunLimits(
+                max_active=config.user_max_active_runs,
+                max_daily=config.user_max_daily_runs,
+            ) if config.hosted_mode else None,
         )
         if inline_run_execution_enabled(config) and run_service.consume_execution_pending(run.run_id):
             background_tasks.add_task(run_service.execute_next_queued)
@@ -386,75 +363,6 @@ def create_app(
     def get_run_metrics(run_id: str, request: Request) -> MetricsResponse:
         _authorize_run_access(config=config, request=request, sessions=sessions, run_service=run_service, run_id=run_id)
         return run_service.get_metrics(run_id)
-
-    @api.get("/evaluations/suites", response_model=list[EvaluationSuiteResponse])
-    def list_evaluation_suites(request: Request) -> list[EvaluationSuiteResponse]:
-        _require_session(request, sessions, config)
-        return eval_service.list_suites()
-
-    @api.post(
-        "/evaluations/runs",
-        response_model=EvaluationRunResponse,
-        status_code=status.HTTP_202_ACCEPTED,
-        responses={422: {"model": ErrorResponse}},
-    )
-    def create_evaluation_run(
-        request: EvaluationRunRequest,
-        http_request: Request,
-        background_tasks: BackgroundTasks,
-    ) -> EvaluationRunResponse:
-        session = _require_session(http_request, sessions, config, csrf=True)
-        run = eval_service.create_and_run(
-            request,
-            created_by=_actor_for_session(session),
-            idempotency_key=http_request.headers.get("Idempotency-Key"),
-            idempotency_owner_key=_eval_idempotency_owner_key(session),
-            execute_inline=False,
-        )
-        if run.status == "queued" and inline_run_execution_enabled(config):
-            background_tasks.add_task(eval_service.execute_next_queued)
-        return run
-
-    @api.get("/evaluations/runs", response_model=list[EvaluationRunResponse])
-    def list_evaluation_runs(request: Request) -> list[EvaluationRunResponse]:
-        session = _require_session(request, sessions, config)
-        return eval_service.list_runs(owner_key=_eval_owner_key(session))
-
-    @api.get(
-        "/evaluations/runs/{eval_run_id}",
-        response_model=EvaluationRunResponse,
-        responses={404: {"model": ErrorResponse}},
-    )
-    def get_evaluation_run(eval_run_id: str, request: Request) -> EvaluationRunResponse:
-        session = _require_session(request, sessions, config)
-        return eval_service.get_run(eval_run_id, owner_key=_eval_owner_key(session))
-
-    @api.get(
-        "/evaluations/runs/{eval_run_id}/cases",
-        response_model=list[EvaluationCaseResultResponse],
-        responses={404: {"model": ErrorResponse}},
-    )
-    def get_evaluation_cases(eval_run_id: str, request: Request) -> list[EvaluationCaseResultResponse]:
-        session = _require_session(request, sessions, config)
-        return eval_service.get_run(eval_run_id, owner_key=_eval_owner_key(session)).case_results
-
-    @api.get(
-        "/evaluations/runs/{eval_run_id}/metrics",
-        response_model=list[EvaluationMetricResponse],
-        responses={404: {"model": ErrorResponse}},
-    )
-    def get_evaluation_metrics(eval_run_id: str, request: Request) -> list[EvaluationMetricResponse]:
-        session = _require_session(request, sessions, config)
-        return eval_service.get_run(eval_run_id, owner_key=_eval_owner_key(session)).metrics
-
-    @api.get(
-        "/evaluations/compare",
-        response_model=EvaluationComparisonResponse,
-        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
-    )
-    def compare_evaluation_runs(run_ids: str, request: Request) -> EvaluationComparisonResponse:
-        session = _require_session(request, sessions, config)
-        return eval_service.compare([item.strip() for item in run_ids.split(",") if item.strip()], owner_key=_eval_owner_key(session))
 
     return api
 
@@ -658,16 +566,6 @@ def _actor_context(owner: RunOwner | None, session: AuthSession | None) -> dict[
         "github_user_id": session.user.github_user_id,
         "github_login": session.user.login,
     }
-
-
-def _eval_idempotency_owner_key(session: AuthSession | None) -> str:
-    return _eval_owner_key(session) or "anonymous"
-
-
-def _eval_owner_key(session: AuthSession | None) -> str | None:
-    if session is None:
-        return None
-    return f"github:{session.user.github_user_id}"
 
 
 def _apply_security_headers(headers) -> None:

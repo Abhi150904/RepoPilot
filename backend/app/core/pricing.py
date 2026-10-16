@@ -12,12 +12,12 @@ class ModelPricing(TypedDict):
 
 
 MODEL_PRICING: dict[tuple[str, str], ModelPricing] = {
-    ("groq", "openai/gpt-oss-120b"): {
-        "input_per_1m": 0.15,
-        "output_per_1m": 0.60,
+    ("openai", "gpt-5.4-mini"): {
+        "input_per_1m": 0.75,
+        "output_per_1m": 4.50,
         "currency": "USD",
-        "source": "https://console.groq.com/docs/models",
-        "updated_at": "2026-10-10",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.4-mini",
+        "updated_at": "2026-10-17",
     },
 }
 
@@ -29,6 +29,8 @@ def estimate_llm_cost_usd(
     prompt_tokens: int | None,
     output_tokens: int | None,
 ) -> float | None:
+    if model == "gpt-5.4-mini-2026-03-17":
+        model = "gpt-5.4-mini"
     pricing = MODEL_PRICING.get((provider, model)) or MODEL_PRICING.get((provider, "*"))
     if pricing is None:
         return None

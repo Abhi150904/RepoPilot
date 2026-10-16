@@ -128,6 +128,27 @@ def test_run_tests_locally_installs_node_dependencies_when_missing(tmp_path, mon
     assert result.passed == 1
 
 
+def test_run_tests_locally_reinstalls_when_node_modules_is_incomplete(tmp_path, monkeypatch) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"lint":"next lint"}}\n')
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    (tmp_path / "node_modules").mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[1:] == ["ci"]:
+            (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_tests_locally(workspace_path=tmp_path, command=["npm", "run", "lint"])
+
+    assert [call[1:] for call in calls] == [["ci"], ["run", "lint"]]
+    assert result.exit_code == 0
+
+
 def test_test_environment_preserves_existing_ci(monkeypatch) -> None:
     monkeypatch.setenv("CI", "existing")
 
@@ -168,6 +189,44 @@ def test_run_tests_locally_returns_command_not_found(tmp_path, monkeypatch) -> N
     assert result.exit_code == 127
     assert result.command == ["missing-tool", "test"]
     assert "Command not found: missing-tool" in result.stderr
+
+
+def test_run_tests_locally_removes_repo_pytest_temp(tmp_path, monkeypatch) -> None:
+    pytest_tmp = tmp_path / ".pytest_tmp"
+
+    def fake_run(command, **kwargs):
+        pytest_tmp.mkdir()
+        (pytest_tmp / "run.log").write_text("temporary pytest output\n")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="===== 1 passed in 0.10s =====", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_tests_locally(
+        workspace_path=tmp_path,
+        command=["python", "-m", "pytest", "--basetemp=.pytest_tmp"],
+    )
+
+    assert result.exit_code == 0
+    assert not pytest_tmp.exists()
+
+
+def test_run_tests_locally_removes_repo_pytest_temp_after_timeout(tmp_path, monkeypatch) -> None:
+    pytest_tmp = tmp_path / ".pytest_tmp"
+
+    def fake_run(command, **kwargs):
+        pytest_tmp.mkdir()
+        raise subprocess.TimeoutExpired(cmd=command, timeout=1, output="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_tests_locally(
+        workspace_path=tmp_path,
+        command=["python", "-m", "pytest", "--basetemp", ".pytest_tmp"],
+        timeout_seconds=1,
+    )
+
+    assert result.timed_out is True
+    assert not pytest_tmp.exists()
 
 
 def test_resolve_command_uses_windows_command_shim(monkeypatch) -> None:

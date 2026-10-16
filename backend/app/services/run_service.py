@@ -12,7 +12,7 @@ from app.agents.approval import ApprovalGate
 from app.agents.publication import PublicationPreparer
 from app.agents.publisher import PublishExecutor
 from app.agents.run_summarizer import RunSummarizer
-from app.api.runs import IdempotencyConflict, RunStore
+from app.api.runs import IdempotencyConflict, RunLimitExceeded, RunLimits, RunStore
 from app.api.schemas import (
     ApprovalRequest,
     MetricsResponse,
@@ -35,6 +35,7 @@ from app.core.audit import (
     AuditLogger,
 )
 from app.core.llm_usage import LLMCallContext, LLMUsageRecorderProtocol, llm_call_context
+from app.core.config import get_settings
 from app.graph.workflow import build_workflow
 from app.schemas.execution import ApprovalDecision, PublicationPackage, PublishResult, ReviewResult
 from app.tools.git import inspect_git_safety
@@ -81,6 +82,7 @@ class RepoPilotRunService:
         request_id: str | None = None,
         owner: RunOwner | None = None,
         idempotency_key: str | None = None,
+        limits: RunLimits | None = None,
     ) -> RunStatusResponse:
         try:
             created = self.run_store.create_result(
@@ -88,8 +90,11 @@ class RepoPilotRunService:
                 request_id=request_id,
                 owner=owner,
                 idempotency_key=idempotency_key,
+                limits=limits,
             )
             run = created.run
+        except RunLimitExceeded as exc:
+            raise RunServiceError(status_code=429, code="run_limit_reached", message=str(exc)) from exc
         except IdempotencyConflict as exc:
             raise RunServiceError(
                 status_code=409,
@@ -258,6 +263,7 @@ class RepoPilotRunService:
         actor_context: dict[str, object] | None = None,
     ) -> RunStatusResponse:
         with self._transition_lock:
+            self._ensure_review_mutable(run_id)
             response = self._completed_response(run_id)
             result = dict(response.result)
             review = _review_result(result)
@@ -288,6 +294,7 @@ class RepoPilotRunService:
         actor_context: dict[str, object] | None = None,
     ) -> RunStatusResponse:
         with self._transition_lock:
+            self._ensure_review_mutable(run_id)
             response = self._completed_response(run_id)
             result = dict(response.result)
             result["approval_decision"] = ApprovalDecision(
@@ -321,6 +328,14 @@ class RepoPilotRunService:
             )
             return updated
 
+    def _ensure_review_mutable(self, run_id: str) -> None:
+        if self.get_run(run_id).publication_status in {"publishing", "published"}:
+            raise RunServiceError(
+                status_code=409,
+                code="review_locked",
+                message="Review decisions cannot change during or after publication.",
+            )
+
     def publish_run(
         self,
         run_id: str,
@@ -338,7 +353,8 @@ class RepoPilotRunService:
                     code="approval_required",
                     message="Run must be approved before publication.",
                 )
-            _validate_approval_binding(result)
+            if request.mode != "dry_run":
+                _validate_approval_binding(result)
             package = _publication_package(result, approval)
             self.run_store.mark_publication_status(
                 run_id,
@@ -433,7 +449,7 @@ def _workflow_input(request: RunRequest) -> dict[str, Any]:
         "apply_changes": request.apply_changes,
         "workspace_path": request.workspace_path,
         "run_tests": request.run_tests,
-        "test_runner": request.test_runner if request.run_tests else None,
+        "test_runner": _test_runner_for_request(request) if request.run_tests else None,
         "test_command": request.test_command,
         "max_repair_attempts": request.max_repair_attempts,
         "approved": request.approved,
@@ -446,6 +462,12 @@ def _workflow_input(request: RunRequest) -> dict[str, Any]:
         if value not in (None, False):
             data[key] = value
     return data
+
+
+def _test_runner_for_request(request: RunRequest) -> str:
+    if request.test_runner == "docker" and get_settings().deployment_environment == "local":
+        return "local"
+    return request.test_runner
 
 
 def _workflow_runtime_input(

@@ -47,8 +47,8 @@ export function ArtifactWorkspace({ view }: { view: RunViewModel }) {
           ))}
         </div>
       </div>
-      <div className="grid gap-4 p-4 xl:grid-cols-[0.75fr_1.25fr]">
-        <div>
+      <div className="flex flex-col gap-4 p-4">
+        <div className="w-full">
           <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Plan</p>
           <div className="mt-3 grid gap-2">
             {view.planSteps.map((step, index) => (
@@ -59,12 +59,12 @@ export function ArtifactWorkspace({ view }: { view: RunViewModel }) {
             ))}
           </div>
         </div>
-        <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-[#07090c]">
-          <div className="flex justify-between border-b border-[var(--border)] px-4 py-2 font-display text-xs text-[var(--text-secondary)]">
-            <span>{view.diffFile}</span>
+        <div className="w-full min-w-0 overflow-hidden rounded-lg border border-[var(--border)] bg-[#07090c]">
+          <div className="flex min-w-0 justify-between gap-3 border-b border-[var(--border)] px-4 py-2 font-display text-xs text-[var(--text-secondary)]">
+            <span className="min-w-0 truncate">{view.diffFile}</span>
             <span>{view.diffStats}</span>
           </div>
-          <pre className="overflow-x-auto py-3 text-xs">
+          <pre className="max-h-[520px] min-h-[320px] overflow-auto py-3 text-xs">
             {view.diffLines.map((line, index) => (
               <code
                 key={`${line.text}-${index}`}
@@ -89,11 +89,12 @@ export function ArtifactWorkspace({ view }: { view: RunViewModel }) {
 
 export function RunIntelligence({ view }: { view: RunViewModel }) {
   const rows = [
-    ["Review confidence", view.review.confidence],
+    ["Automated review", view.review.status],
+    ["Tests", view.tests.label],
     ["Changed files", String(view.changedFiles.length)],
     ["Risk", view.review.risk],
     ["Repair attempts", view.repairAttempts],
-    ["Tokens", view.tokens]
+    ["Run duration", view.duration]
   ];
   return (
     <aside className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
@@ -102,7 +103,7 @@ export function RunIntelligence({ view }: { view: RunViewModel }) {
         {rows.map(([label, value]) => (
           <div key={label} className="border-b border-[var(--border)] pb-3 last:border-b-0">
             <span className="text-xs text-[var(--text-secondary)]">{label}</span>
-            <strong className="mt-1 block font-display text-xl">{value}</strong>
+            <strong className="mt-1 block break-words font-display text-xl">{value}</strong>
           </div>
         ))}
       </div>
@@ -127,7 +128,18 @@ export function ReviewPanel({
   onReject: () => void;
   onPublish: (mode: PublishMode) => void;
 }) {
-  const canAct = run?.lifecycle_status === "completed";
+  const isCompleted = run?.lifecycle_status === "completed";
+  const published = run?.publication_status === "published";
+  const publicationLocked = published || run?.publication_status === "publishing";
+  const canAct = isCompleted && view.tests.passed === true && view.review.blockers === 0;
+  const decisionTitle = canAct ? "Ready for decision" : isCompleted ? "Approval blocked" : "Awaiting completed run";
+  const decisionSummary = canAct
+    ? view.tests.summary
+    : isCompleted
+      ? view.tests.passed === false
+        ? view.tests.summary
+        : "RepoPilot did not produce a passing review package for approval."
+      : "Start a run and wait for it to complete before approval.";
   const approvalDecision = run?.response?.result?.approval_decision;
   const approved = Boolean(
     approvalDecision &&
@@ -156,17 +168,17 @@ export function ReviewPanel({
       </section>
       <aside className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
         <LockKeyhole className="text-cyan-300" size={24} />
-        <h2 className="mt-4 font-display text-2xl font-semibold">{canAct ? "Ready for decision" : "Awaiting completed run"}</h2>
-        <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{canAct ? view.tests.summary : "Start a run and wait for it to complete before approval."}</p>
-        <div className="mt-6 grid gap-2">
+        <h2 className="mt-4 font-display text-2xl font-semibold">{published ? "Published" : publicationLocked ? "Publishing" : approved ? "Changes approved" : decisionTitle}</h2>
+        <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{publicationLocked ? "The review decision is locked. Publication details are below." : approved ? "Approval recorded. Choose a publication option below." : decisionSummary}</p>
+        {!publicationLocked ? <div className="mt-6 grid gap-2">
           <Button variant="danger" disabled={!canAct || isBusy} onClick={onReject}>Reject</Button>
-          <Button variant="primary" disabled={!canAct || isBusy} onClick={onApprove}>Approve changes</Button>
-        </div>
+          <Button variant="primary" disabled={!canAct || isBusy || approved} onClick={onApprove}>{approved ? "Approved" : "Approve changes"}</Button>
+        </div> : null}
         {approved ? (
           <div className="mt-6 border-t border-[var(--border)] pt-5">
             <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Publication options</p>
             <PublicationStatus view={view} activeAction={activeAction} />
-            <div className="mt-3 grid gap-2">
+            {!publicationLocked ? <div className="mt-3 grid gap-2">
               {publishModes.map((option) => (
                 <Button
                   key={option.title}
@@ -178,7 +190,7 @@ export function ReviewPanel({
                   {activeAction === modeForTitle(option.title) ? "Working..." : option.title}
                 </Button>
               ))}
-            </div>
+            </div> : null}
           </div>
         ) : null}
       </aside>

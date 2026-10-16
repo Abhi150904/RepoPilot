@@ -14,7 +14,7 @@ class SandboxError(ValueError):
 
 
 DEFAULT_DOCKER_IMAGE = "python:3.11-slim"
-DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_OUTPUT_LIMIT = 12_000
 
 
@@ -59,6 +59,8 @@ def run_tests_in_docker(
             timed_out=True,
             command=command,
         )
+    finally:
+        _cleanup_local_test_artifacts(workspace=workspace, command=command)
 
 
 def run_tests_locally(
@@ -107,6 +109,8 @@ def run_tests_locally(
         )
     except FileNotFoundError:
         return _command_not_found_result(command)
+    finally:
+        _cleanup_local_test_artifacts(workspace=workspace, command=command)
 
 
 def build_docker_command(
@@ -189,7 +193,7 @@ def _prepare_local_dependencies(
     timeout_seconds: int,
     output_limit: int,
 ) -> TestResult | None:
-    if not (workspace / "package.json").exists() or (workspace / "node_modules").exists():
+    if not (workspace / "package.json").exists() or _node_dependencies_ready(workspace):
         return None
 
     command = ["npm", "ci"] if (workspace / "package-lock.json").exists() else ["npm", "install"]
@@ -226,6 +230,13 @@ def _prepare_local_dependencies(
     )
 
 
+def _node_dependencies_ready(workspace: Path) -> bool:
+    node_modules = workspace / "node_modules"
+    if not node_modules.exists():
+        return False
+    return (node_modules / ".bin").exists()
+
+
 def _resolve_command(command: list[str]) -> list[str]:
     executable = command[0]
     resolved = shutil.which(executable)
@@ -260,3 +271,24 @@ def _command_not_found_result(command: list[str]) -> TestResult:
         timed_out=False,
         command=command,
     )
+
+
+def _cleanup_local_test_artifacts(*, workspace: Path, command: list[str]) -> None:
+    if not _uses_repo_pytest_temp(command):
+        return
+    artifact_path = (workspace / ".pytest_tmp").resolve()
+    try:
+        artifact_path.relative_to(workspace)
+    except ValueError:
+        return
+    if artifact_path.exists():
+        shutil.rmtree(artifact_path, ignore_errors=True)
+
+
+def _uses_repo_pytest_temp(command: list[str]) -> bool:
+    for index, token in enumerate(command):
+        if token == "--basetemp=.pytest_tmp" or token == "--basetemp=./.pytest_tmp":
+            return True
+        if token == "--basetemp" and index + 1 < len(command):
+            return command[index + 1] in {".pytest_tmp", "./.pytest_tmp"}
+    return False
