@@ -9,7 +9,7 @@ from threading import Lock
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, UniqueConstraint, create_engine, select
+from sqlalchemy import BigInteger, DateTime, Integer, String, UniqueConstraint, create_engine, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 
 class IdempotencyConflict(Exception):
     pass
+
+
+class RunLimitExceeded(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class RunLimits:
+    max_active: int
+    max_daily: int
+
+    def check(self, *, active: int, recent: int) -> None:
+        if active >= self.max_active:
+            raise RunLimitExceeded(f"You already have {self.max_active} queued or running run(s). Wait for a run to finish before starting another.")
+        if recent >= self.max_daily:
+            raise RunLimitExceeded(f"Your limit of {self.max_daily} new runs in 24 hours has been reached. Try again when an earlier run leaves that window.")
 
 
 class Base(DeclarativeBase):
@@ -173,12 +189,17 @@ class RunStore:
         request_id: str | None = None,
         owner: RunOwner | None = None,
         idempotency_key: str | None = None,
+        limits: RunLimits | None = None,
     ) -> CreateRunResult:
         now = _now()
         payload_hash = _payload_hash(request)
         owner_key = _idempotency_owner_key(owner)
+        if limits is not None and owner is None:
+            raise ValueError("Per-user run limits require an authenticated owner.")
         if self._session_factory:
             with self._session_factory() as session:
+                if limits is not None:
+                    self._lock_user_admission(session, owner.github_user_id)
                 existing = self._existing_idempotent_run(
                     session=session,
                     idempotency_key=idempotency_key,
@@ -187,6 +208,11 @@ class RunStore:
                 )
                 if existing:
                     return CreateRunResult(run=existing.to_response(), created=False)
+                if limits is not None:
+                    user_runs = select(func.count()).select_from(RunRow).where(RunRow.owner_github_user_id == owner.github_user_id)
+                    active = session.scalar(user_runs.where(RunRow.lifecycle_status.in_(["queued", "running"]))) or 0
+                    recent = session.scalar(user_runs.where(RunRow.created_at >= now - timedelta(hours=24))) or 0
+                    limits.check(active=active, recent=recent)
                 record = RunRecord(
                     run_id=uuid4().hex,
                     lifecycle_status="queued",
@@ -241,10 +267,28 @@ class RunStore:
                         if existing.payload_hash != payload_hash:
                             raise IdempotencyConflict("Idempotency-Key was reused with a different payload.")
                         return CreateRunResult(run=existing.to_response(), created=False)
+            if limits is not None:
+                user_runs = [record for record in self._runs.values() if record.owner and record.owner.github_user_id == owner.github_user_id]
+                limits.check(
+                    active=sum(record.lifecycle_status in {"queued", "running"} for record in user_runs),
+                    recent=sum(record.created_at >= now - timedelta(hours=24) for record in user_runs),
+                )
             record.events.append(_event(record.run_id, "run.created", now, {"request_id": request_id}))
             record.events.append(_event(record.run_id, "run.queued", now, {}))
             self._runs[record.run_id] = record
         return CreateRunResult(run=record.to_response(), created=True)
+
+    @staticmethod
+    def _lock_user_admission(session: Session, user_id: int) -> None:
+        # Serialize quota checks and insertion across API processes, not just threads.
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            key = int.from_bytes(hashlib.sha256(f"repopilot:admission:{user_id}".encode()).digest()[:8], "big") & ((1 << 63) - 1)
+            session.execute(select(func.pg_advisory_xact_lock(key)))
+        elif dialect == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise ValueError("Per-user run limits require PostgreSQL or SQLite.")
 
     def get(self, run_id: str) -> RunStatusResponse | None:
         if self._session_factory:
@@ -854,6 +898,9 @@ def _safe_error_message(exc: Exception) -> str:
     if code == "github_error":
         return "GitHub operation failed. Check repository access and token configuration."
     if code == "workspace_error":
+        detail = str(exc).strip()
+        if detail:
+            return f"Workspace operation failed: {detail}"
         return "Workspace operation failed. Check workspace state and permissions."
     if code == "provider_error":
         return "Model provider operation failed. Check provider configuration."

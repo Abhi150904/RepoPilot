@@ -64,6 +64,28 @@ def test_github_callback_rejects_missing_or_invalid_state() -> None:
     assert invalid.json()["error"]["code"] == "invalid_oauth_state"
 
 
+def test_github_login_reuses_authenticated_session() -> None:
+    client = _authenticated_client()
+
+    response = client.get("/auth/github/login", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "http://frontend.test/app"
+    assert "repopilot_oauth_state" not in response.cookies
+    assert client.get("/auth/me").json()["authenticated"] is True
+
+
+def test_github_login_starts_oauth_for_stale_session() -> None:
+    client = _authenticated_client()
+    client.cookies.set("repopilot_session", "expired-session", domain="api.test", path="/")
+
+    response = client.get("/auth/github/login", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://github.test/login?")
+    assert "repopilot_oauth_state" in response.cookies
+
+
 def test_successful_callback_creates_safe_session_and_auth_me() -> None:
     client = TestClient(
         create_app(
@@ -220,6 +242,24 @@ def test_hosted_run_actions_require_owner_and_csrf(monkeypatch) -> None:
     assert forbidden.status_code == 404
 
 
+def test_hosted_creation_enforces_quota_and_allows_idempotent_replay() -> None:
+    settings = _hosted_settings().model_copy(update={"inline_run_execution": False, "user_max_active_runs": 1, "user_max_daily_runs": 5})
+    client = _authenticated_client(settings=settings)
+    csrf = client.get("/auth/me").json()["csrf_token"]
+    headers = {"x-csrf-token": csrf, "Idempotency-Key": "first-run"}
+    request = {"repository": "octo/repo", "issue_number": 1}
+    first = client.post("/runs", json=request, headers=headers)
+    assert first.status_code == 202
+    replay = client.post("/runs", json=request, headers=headers)
+    assert replay.status_code == 202
+    assert replay.json()["run_id"] == first.json()["run_id"]
+    limited = client.post("/runs", json={**request, "issue_number": 2}, headers={"x-csrf-token": csrf})
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "run_limit_reached"
+    assert len(client.get("/runs").json()) == 1
+    assert client.get("/evaluations/suites").status_code == 404
+
+
 def test_github_repository_listing_never_returns_installation_token() -> None:
     client = _authenticated_client(app_service=FakeGitHubAppService(installation_token="install-secret"))
 
@@ -234,12 +274,13 @@ def _authenticated_client(
     *,
     user: GitHubUser | None = None,
     app_service: FakeGitHubAppService | None = None,
+    settings: Settings | None = None,
 ) -> TestClient:
     sessions = InMemorySessionStore()
     oauth = FakeOAuthClient(user=user or GitHubUser(101, "octo", "https://avatar.test/octo.png", "Octo Cat"))
     client = TestClient(
         create_app(
-            settings=_hosted_settings(),
+            settings=settings or _hosted_settings(),
             session_store=sessions,
             oauth_client=oauth,
             github_app_service=app_service or FakeGitHubAppService(),

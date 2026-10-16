@@ -1,16 +1,20 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ArrowRight, Check, Play } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { pollResource } from "@/lib/poll-resource";
 import { Button } from "@/components/button";
 import { createRun, listRuns, type RunRequest } from "@/lib/api";
 import { buildRunRequest } from "@/lib/run-request";
 import { summaryFromRun, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 export default function CommandCenterPage() {
+  const router = useRouter();
   const [history, setHistory] = useState<StoredRunSummary[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -18,25 +22,19 @@ export default function CommandCenterPage() {
   const [issueNumber, setIssueNumber] = useState("");
 
   useEffect(() => {
-    let active = true;
-    async function loadRuns() {
-      try {
-        const backendRuns = await listRuns();
-        if (active) {
-          setHistory(summariesFromRuns(backendRuns));
-          setHistoryError(null);
-        }
-      } catch (caught) {
-        if (active) {
-          setHistory([]);
-          setHistoryError(caught instanceof Error ? caught.message : "Could not load runs from the API.");
-        }
+    setIsLoadingHistory(true);
+    return pollResource({
+      load: (signal) => listRuns(signal),
+      onData: (backendRuns) => {
+        setHistory(summariesFromRuns(backendRuns));
+        setHistoryError(null);
+        setIsLoadingHistory(false);
+      },
+      onError: (caught) => {
+        setHistoryError(caught instanceof Error ? caught.message : "Could not load runs from the API.");
+        setIsLoadingHistory(false);
       }
-    }
-    loadRuns();
-    return () => {
-      active = false;
-    };
+    });
   }, []);
 
   async function startRun() {
@@ -62,6 +60,7 @@ export default function CommandCenterPage() {
     try {
       const run = await createRun(request);
       setHistory((current) => [summaryFromRun(run), ...current.filter((item) => item.runId !== run.run_id)]);
+      router.push(`/runs/${run.run_id}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not start run.");
     } finally {
@@ -69,7 +68,7 @@ export default function CommandCenterPage() {
     }
   }
 
-  const needsAttention = history.filter((run) => ["completed", "failed"].includes(run.status));
+  const needsAttention = history.filter((run) => run.needsAttention);
 
   return (
     <AppShell>
@@ -93,10 +92,10 @@ export default function CommandCenterPage() {
           />
         </section>
         <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-          <AttentionPanel runs={needsAttention} />
-          <ActivePanel runs={history.filter((run) => ["queued", "running"].includes(run.status))} />
+          <AttentionPanel runs={needsAttention} isLoading={isLoadingHistory} />
+          <ActivePanel runs={history.filter((run) => ["queued", "running"].includes(run.status))} isLoading={isLoadingHistory} />
         </section>
-        <RecentRuns runs={history} error={historyError} />
+        <RecentRuns runs={history} error={historyError} isLoading={isLoadingHistory} />
       </div>
     </AppShell>
   );
@@ -144,13 +143,14 @@ function QuickRunCard({
   );
 }
 
-function AttentionPanel({ runs }: { runs: StoredRunSummary[] }) {
+function AttentionPanel({ runs, isLoading }: { runs: StoredRunSummary[]; isLoading: boolean }) {
   return (
     <section className="rounded-xl border border-cyan-400/25 bg-[var(--surface)] p-5">
       <p className="font-display text-xs uppercase text-cyan-300">Needs your attention</p>
-      <h2 className="mt-2 font-display text-3xl font-semibold">{runs.length ? `${runs.length} runs need your attention` : "You're all caught up."}</h2>
+      <h2 className="mt-2 font-display text-3xl font-semibold">{isLoading ? "Checking run queue..." : runs.length ? `${runs.length} runs need your attention` : "You're all caught up."}</h2>
       <div className="mt-5 grid gap-3">
-        {(runs.length ? runs : [{ runId: "empty", repository: "No reviewed runs waiting", issue: "Completed runs that need your approval will appear here.", status: "empty", tests: "—", duration: "n/a", updatedAt: "" }]).map((run) => (
+        {isLoading ? <PanelSkeleton /> : null}
+        {!isLoading && (runs.length ? runs : [{ runId: "empty", repository: "No reviewed runs waiting", issue: "Runs waiting for approval or human inspection will appear here.", status: "empty", statusLabel: "empty", stage: "Idle", tests: "—", duration: "n/a", updatedAt: "", needsAttention: false, attentionLabel: "", attentionAction: "inspect" as const }]).map((run) => (
           <div key={run.runId} className="rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -158,13 +158,13 @@ function AttentionPanel({ runs }: { runs: StoredRunSummary[] }) {
                 <span className="text-sm text-[var(--text-secondary)]">{run.issue}</span>
               </div>
               {run.runId !== "empty" ? (
-                <Link className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm hover:border-cyan-300" href={`/runs/${run.runId}/review`}>
-                  Review
+                <Link className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm hover:border-cyan-300" href={run.attentionAction === "review" ? `/runs/${run.runId}/review` : `/runs/${run.runId}`}>
+                  {run.attentionAction === "review" ? "Review" : "Inspect"}
                   <ArrowRight size={15} />
                 </Link>
               ) : null}
             </div>
-            {run.runId !== "empty" ? <p className="mt-3 text-sm text-[var(--text-secondary)]"><Check className="mr-1 inline text-lime-300" size={15} />Ready for approval</p> : null}
+            {run.runId !== "empty" ? <p className="mt-3 text-sm text-[var(--text-secondary)]"><Check className="mr-1 inline text-lime-300" size={15} />{run.attentionLabel}</p> : null}
           </div>
         ))}
       </div>
@@ -172,18 +172,19 @@ function AttentionPanel({ runs }: { runs: StoredRunSummary[] }) {
   );
 }
 
-function ActivePanel({ runs }: { runs: StoredRunSummary[] }) {
+function ActivePanel({ runs, isLoading }: { runs: StoredRunSummary[]; isLoading: boolean }) {
   return (
     <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
       <p className="font-display text-xs uppercase text-[var(--text-secondary)]">Active engineering</p>
       <div className="mt-4 grid gap-3">
-        {(runs.length ? runs : [{ runId: "empty", repository: "No runs in progress", issue: "Start a run to watch RepoPilot work.", status: "idle", tests: "—", duration: "n/a", updatedAt: "" }]).map((run) => (
+        {isLoading ? <PanelSkeleton /> : null}
+        {!isLoading && (runs.length ? runs : [{ runId: "empty", repository: "No runs in progress", issue: "Start a run to watch RepoPilot work.", status: "idle", statusLabel: "idle", stage: "Idle", tests: "—", duration: "n/a", updatedAt: "", needsAttention: false, attentionLabel: "", attentionAction: "inspect" as const }]).map((run) => (
           <div key={run.runId} className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-3">
             <span>
               <strong className="block text-sm">{run.repository}</strong>
               <small className="text-[var(--text-secondary)]">{run.issue}</small>
             </span>
-            <span className="rounded-full bg-cyan-400/10 px-2 py-1 text-xs text-cyan-200">{run.status}</span>
+            <span className="rounded-full bg-cyan-400/10 px-2 py-1 text-xs text-cyan-200">{run.statusLabel}</span>
           </div>
         ))}
       </div>
@@ -191,27 +192,34 @@ function ActivePanel({ runs }: { runs: StoredRunSummary[] }) {
   );
 }
 
-function RecentRuns({ runs, error }: { runs: StoredRunSummary[]; error: string | null }) {
+function RecentRuns({ runs, error, isLoading }: { runs: StoredRunSummary[]; error: string | null; isLoading: boolean }) {
   return (
     <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)]">
       <div className="border-b border-[var(--border)] px-5 py-4">
         <h2 className="font-display text-lg font-semibold">Recent runs</h2>
       </div>
       <div className="divide-y divide-[var(--border)]">
-        {error ? (
+        {isLoading ? (
+          <div className="grid gap-3 px-5 py-5">
+            <SkeletonLine className="h-4 w-2/3" />
+            <SkeletonLine className="h-4 w-1/2" />
+            <SkeletonLine className="h-4 w-3/5" />
+          </div>
+        ) : null}
+        {!isLoading && error ? (
           <div className="px-5 py-8">
             <p className="text-sm text-red-300">Could not load recent runs.</p>
             <p className="mt-2 text-sm text-[var(--text-secondary)]">{error}</p>
           </div>
         ) : null}
-        {!error && (runs.length ? runs : []).map((run) => (
+        {!isLoading && !error && (runs.length ? runs : []).map((run) => (
           <Link key={run.runId} href={`/runs/${run.runId}`} className="grid gap-3 px-5 py-4 text-sm hover:bg-[var(--surface-elevated)] md:grid-cols-[1fr_120px_160px]">
             <span>{run.repository} <small className="text-[var(--text-secondary)]">{run.issue}</small></span>
-            <span className="text-[var(--text-secondary)]">{run.status}</span>
+            <span className="text-[var(--text-secondary)]">{run.statusLabel}</span>
             <span className="text-[var(--text-secondary)]">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ""}</span>
           </Link>
         ))}
-        {!error && !runs.length ? (
+        {!isLoading && !error && !runs.length ? (
           <div className="px-5 py-8">
             <p className="text-sm text-[var(--text-secondary)]">No runs yet. Create your first run to build your execution history.</p>
             <Link className="mt-3 inline-flex text-sm font-medium text-cyan-300 hover:text-cyan-200" href="/app">Start a run</Link>
@@ -220,4 +228,17 @@ function RecentRuns({ runs, error }: { runs: StoredRunSummary[]; error: string |
       </div>
     </section>
   );
+}
+
+function PanelSkeleton() {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] p-4">
+      <SkeletonLine className="h-5 w-2/3" />
+      <SkeletonLine className="mt-3 h-4 w-1/2" />
+    </div>
+  );
+}
+
+function SkeletonLine({ className = "" }: { className?: string }) {
+  return <div className={`animate-pulse rounded bg-white/10 ${className}`} />;
 }

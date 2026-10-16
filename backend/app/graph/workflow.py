@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -8,7 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.approval import ApprovalGate
 from app.agents.analyzer import IssueAnalyzer
-from app.agents.coder import CodeWriter
+from app.agents.coder import CodeWriter, CodeWriterError
 from app.agents.planner import Planner
 from app.agents.publication import PublicationPreparer
 from app.agents.publisher import PublishExecutor
@@ -325,7 +326,7 @@ def code_writer_node(state: AgentState) -> AgentState:
             repository_context=repository_context,
             repair_context=repair_context,
         )
-    except LLMProviderError as exc:
+    except (CodeWriterError, LLMProviderError) as exc:
         return _node_failure_update(
             state=state,
             stage="coder",
@@ -367,6 +368,16 @@ def run_tests_node(state: AgentState) -> AgentState:
         raise ValueError("workspace_path is required when run_tests is true.")
 
     command = _test_command_for_workspace(workspace_path, state.get("test_command"))
+    if command is None:
+        return {
+            "test_result": TestResult(
+                exit_code=0,
+                stdout="",
+                stderr="No automated test, lint, or build command was found.",
+                timed_out=False,
+                command=[],
+            ).model_dump()
+        }
     runner = _test_runner_for_workspace(workspace_path, state.get("test_runner", "docker"), command)
     if runner == "local":
         result = run_tests_locally(workspace_path=workspace_path, command=command)
@@ -381,13 +392,29 @@ def run_tests_node(state: AgentState) -> AgentState:
 def _test_command_for_workspace(
     workspace_path: str,
     requested_command: list[str] | None,
-) -> list[str]:
+) -> list[str] | None:
     if requested_command:
         return requested_command
     workspace = Path(workspace_path)
     if (workspace / "package.json").exists():
-        return ["npm", "test"]
-    return ["python", "-m", "pytest", "-p", "no:cacheprovider"]
+        scripts = _package_json_scripts(workspace / "package.json")
+        if "test" in scripts:
+            return ["npm", "test"]
+        if "lint" in scripts and not _is_stale_next_lint_script(scripts["lint"]):
+            return ["npm", "run", "lint"]
+        if "build" in scripts:
+            return ["npm", "run", "build"]
+        if "lint" in scripts:
+            return ["npm", "run", "lint"]
+        return None
+    return [
+        "python",
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp=.pytest_tmp",
+    ]
 
 
 def _test_runner_for_workspace(
@@ -396,9 +423,24 @@ def _test_runner_for_workspace(
     command: list[str],
 ) -> str:
     workspace = Path(workspace_path)
-    if requested_runner == "docker" and (workspace / "package.json").exists() and command[:2] == ["npm", "test"]:
+    if requested_runner == "docker" and (workspace / "package.json").exists() and command[:1] == ["npm"]:
         return "local"
     return requested_runner
+
+
+def _package_json_scripts(package_json_path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    scripts = data.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    return {key: value for key, value in scripts.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def _is_stale_next_lint_script(script: str) -> bool:
+    return script.strip() == "next lint"
 
 
 def analyze_tests_node(state: AgentState) -> AgentState:
@@ -695,10 +737,13 @@ def _build_run_metrics(state: AgentState) -> RunMetrics:
             models.append(call.model)
     return RunMetrics(
         llm_calls=llm_calls,
-        prompt_tokens=sum(call.prompt_tokens or 0 for call in llm_calls),
-        output_tokens=sum(call.output_tokens or 0 for call in llm_calls),
-        total_tokens=sum(call.total_tokens or 0 for call in llm_calls),
-        estimated_cost_usd=round(sum(cost_values), 6) if cost_values else None,
+        prompt_tokens=_complete_usage_total(llm_calls, "prompt_tokens"),
+        output_tokens=_complete_usage_total(llm_calls, "output_tokens"),
+        total_tokens=_complete_usage_total(llm_calls, "total_tokens"),
+        estimated_cost_usd=(
+            round(sum(cost_values), 6)
+            if cost_values and len(cost_values) == len(llm_calls) else None
+        ),
         llm_call_count=len(llm_calls),
         retries=sum(call.retry_count for call in llm_calls),
         repair_attempts=int(state.get("repair_attempts", 0)),
@@ -709,6 +754,11 @@ def _build_run_metrics(state: AgentState) -> RunMetrics:
         stage_timings=stage_timings,
         models_by_role=models_by_role,
     )
+
+
+def _complete_usage_total(calls: list[LLMUsageEvent], field: str) -> int | None:
+    values = [getattr(call, field) for call in calls]
+    return sum(values) if values and all(value is not None for value in values) else None
 
 
 def _select_target_paths(

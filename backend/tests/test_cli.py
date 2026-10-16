@@ -126,7 +126,7 @@ def test_cli_legacy_root_flags_still_work(monkeypatch) -> None:
         "repository": "example/demo",
         "issue_number": 16,
         "run_tests": True,
-        "test_runner": "docker",
+        "test_runner": "local",
         "max_repair_attempts": 1,
         "test_command": ["python", "-m", "pytest"],
         "_run_id": captured["state"]["_run_id"],
@@ -375,6 +375,7 @@ def test_packaging_exposes_console_script_and_backend_package() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["scripts"]["repopilot"] == "app.cli:main"
+    assert pyproject["project"]["scripts"]["repopilot-api-dev"] == "app.dev_server:main"
     assert pyproject["tool"]["setuptools"]["package-dir"] == {"": "backend"}
     assert pyproject["tool"]["setuptools"]["packages"]["find"]["where"] == ["backend"]
 
@@ -382,9 +383,9 @@ def test_packaging_exposes_console_script_and_backend_package() -> None:
 def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
     cli = importlib.import_module("app.cli")
 
-    monkeypatch.setenv("REPO_PILOT_LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "gemini-test-model")
-    monkeypatch.setenv("GEMINI_API_KEY", "secret")
+    monkeypatch.setenv("REPO_PILOT_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "gpt-5.4-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
     monkeypatch.delenv("REPO_PILOT_HOSTED_MODE", raising=False)
     monkeypatch.delenv("REPOPILOT_HOSTED_MODE", raising=False)
@@ -399,9 +400,9 @@ def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
     assert "Status: valid" in output
     assert "Environment: local" in output
     assert "Hosted mode: disabled" in output
-    assert "LLM provider: gemini" in output
-    assert "LLM model: gemini-test-model" in output
-    assert "Gemini API key: configured" in output
+    assert "LLM provider: openai" in output
+    assert "LLM model: gpt-5.4-mini" in output
+    assert "OpenAI API key: configured" in output
     assert "GitHub token: configured" in output
     assert "Database: missing" in output
     assert "Inline run execution: enabled" in output
@@ -411,9 +412,9 @@ def test_cli_config_validate_prints_human_report(monkeypatch, capsys) -> None:
 def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
     cli = importlib.import_module("app.cli")
 
-    monkeypatch.setenv("REPO_PILOT_LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "gemini-test-model")
-    monkeypatch.setenv("GEMINI_API_KEY", "secret")
+    monkeypatch.setenv("REPO_PILOT_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("REPO_PILOT_LLM_MODEL", "gpt-5.4-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
     monkeypatch.delenv("REPO_PILOT_HOSTED_MODE", raising=False)
     monkeypatch.delenv("REPOPILOT_HOSTED_MODE", raising=False)
@@ -430,9 +431,9 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
     assert body["deployment_environment"] == "local"
     assert body["hosted_mode"] is False
     assert body["public_base_url"] is None
-    assert body["llm_provider"] == "gemini"
-    assert body["llm_model"] == "gemini-test-model"
-    assert body["gemini_api_key"] == {
+    assert body["llm_provider"] == "openai"
+    assert body["llm_model"] == "gpt-5.4-mini"
+    assert body["openai_api_key"] == {
         "required": True,
         "configured": True,
         "status": "configured",
@@ -458,6 +459,7 @@ def test_cli_config_validate_json_reports_settings(monkeypatch, capsys) -> None:
 
 def test_cli_config_validate_reports_hosted_worker_shape(monkeypatch, capsys) -> None:
     cli = importlib.import_module("app.cli")
+    monkeypatch.setenv("REPO_PILOT_LLM_PROVIDER", "mock")
 
     monkeypatch.setenv("REPO_PILOT_HOSTED_MODE", "true")
     monkeypatch.setenv("REPO_PILOT_PUBLIC_BASE_URL", "https://repopilot.example")
@@ -489,7 +491,7 @@ def test_cli_config_validate_reports_hosted_worker_shape(monkeypatch, capsys) ->
     assert any("separate worker process" in warning for warning in body["warnings"])
 
 
-def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
+def test_cli_config_validate_returns_nonzero_for_missing_required_openai_key(
     monkeypatch,
     capsys,
 ) -> None:
@@ -499,9 +501,9 @@ def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
         cli,
         "get_settings",
         lambda: SimpleNamespace(
-            llm_provider="gemini",
-            llm_model="gemini-test-model",
-            gemini_api_key=None,
+            llm_provider="openai",
+            llm_model="gpt-5.4-mini",
+            openai_api_key=None,
             github_token=None,
             deployment_environment="local",
             hosted_mode=False,
@@ -519,7 +521,7 @@ def test_cli_config_validate_returns_nonzero_for_missing_required_gemini_key(
     output = capsys.readouterr().out
     assert exit_code == 1
     assert "Status: invalid" in output
-    assert "GEMINI_API_KEY is required" in output
+    assert "OPENAI_API_KEY is required" in output
 
 
 def test_cli_config_validate_rejects_hosted_personal_token(monkeypatch, capsys) -> None:

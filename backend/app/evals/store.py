@@ -151,7 +151,21 @@ class EvaluationStore:
                     created_at=now,
                 )
                 session.add(suite)
-                session.flush()
+                try:
+                    session.flush()
+                except IntegrityError:
+                    session.rollback()
+                    suite = session.scalars(
+                        select(EvalSuiteRow).where(EvalSuiteRow.name == name, EvalSuiteRow.version == version)
+                    ).first()
+                    if suite is None:
+                        raise
+                    existing_cases = list(session.scalars(select(EvalCaseRow).where(EvalCaseRow.suite_id == suite.id).order_by(EvalCaseRow.case_key)))
+                    if suite.eval_type != eval_type or _cases_hash(existing_cases) != _case_payloads_hash(cases):
+                        raise EvaluationConflict("Evaluation suite versions are immutable. Bump the suite version when benchmark cases change.")
+                    suite.description = description
+                    session.commit()
+                    return _suite_response(suite)
             else:
                 existing_cases = list(session.scalars(select(EvalCaseRow).where(EvalCaseRow.suite_id == suite.id).order_by(EvalCaseRow.case_key)))
                 if suite.eval_type != eval_type or _cases_hash(existing_cases) != _case_payloads_hash(cases):

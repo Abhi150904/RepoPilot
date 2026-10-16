@@ -65,6 +65,15 @@ class LLMUsageRecorderProtocol(Protocol):
 _current_context: ContextVar[LLMCallContext | None] = ContextVar("repopilot_llm_call_context", default=None)
 
 
+def current_llm_run_id() -> str | None:
+    context = _current_context.get()
+    if context is None:
+        return None
+    return context.run_id or (
+        f"eval:{context.eval_run_id}:{context.eval_case_id}" if context.eval_run_id else None
+    )
+
+
 @contextmanager
 def llm_call_context(context: LLMCallContext) -> Iterator[None]:
     token = _current_context.set(context)
@@ -137,6 +146,10 @@ class LLMUsageRecorder:
                     func.sum(LLMUsageEventRow.completion_tokens),
                     func.sum(LLMUsageEventRow.total_tokens),
                     func.sum(LLMUsageEventRow.estimated_cost_usd),
+                    func.count(LLMUsageEventRow.prompt_tokens),
+                    func.count(LLMUsageEventRow.completion_tokens),
+                    func.count(LLMUsageEventRow.total_tokens),
+                    func.count(LLMUsageEventRow.estimated_cost_usd),
                 ).where(*filters)
             ).one()
             by_role_rows = session.execute(
@@ -144,19 +157,23 @@ class LLMUsageRecorder:
                     LLMUsageEventRow.role,
                     func.count(LLMUsageEventRow.id),
                     func.sum(LLMUsageEventRow.total_tokens),
+                    func.count(LLMUsageEventRow.total_tokens),
                 )
                 .where(*filters)
                 .group_by(LLMUsageEventRow.role)
             ).all()
         return {
             "llm_call_count": int(totals[0] or 0),
-            "prompt_tokens": _optional_int(totals[1]),
-            "completion_tokens": _optional_int(totals[2]),
-            "total_tokens": _optional_int(totals[3]),
-            "estimated_cost_usd": _optional_float(totals[4]),
+            "prompt_tokens": _optional_int(totals[1]) if totals[5] == totals[0] else None,
+            "completion_tokens": _optional_int(totals[2]) if totals[6] == totals[0] else None,
+            "total_tokens": _optional_int(totals[3]) if totals[7] == totals[0] else None,
+            "estimated_cost_usd": _optional_float(totals[4]) if totals[8] == totals[0] else None,
             "by_role": {
-                str(role): {"calls": int(calls or 0), "total_tokens": _optional_int(total_tokens)}
-                for role, calls, total_tokens in by_role_rows
+                str(role): {
+                    "calls": int(calls or 0),
+                    "total_tokens": _optional_int(total_tokens) if known == calls else None,
+                }
+                for role, calls, total_tokens, known in by_role_rows
             },
         }
 

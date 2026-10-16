@@ -1,21 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from copy import deepcopy
-import json
 import re
-import time
 from typing import TypeVar
+from pydantic import BaseModel
 
-import httpx
-from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings, get_settings
-from app.core.llm_usage import record_llm_usage
-from app.core.pricing import estimate_llm_cost_usd
 from app.schemas.code_change import CodeChangeSet, FileChange, SourceFile
 from app.schemas.execution import (
-    LLMUsageEvent,
     RepairContext,
     ReviewFinding,
     ReviewResult,
@@ -176,474 +169,28 @@ class MockLLMProvider(LLMProvider):
         )
 
 
-class GeminiLLMProvider(LLMProvider):
-    """Gemini-backed provider for structured code generation."""
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        role: str = "coder",
-        timeout_seconds: float = 60.0,
-        max_retries: int = 2,
-        max_output_tokens: int = 8192,
-        max_prompt_chars: int = 120_000,
-        sleep: object = time.sleep,
-    ) -> None:
-        self._api_key = api_key
-        self._model = model
-        self._role = role
-        self._timeout_seconds = timeout_seconds
-        self._max_retries = max(0, max_retries)
-        self._max_output_tokens = max_output_tokens
-        self._max_prompt_chars = max_prompt_chars
-        self._sleep = sleep
-        self._usage_events: list[LLMUsageEvent] = []
-
-    @property
-    def usage_events(self) -> list[LLMUsageEvent]:
-        return list(self._usage_events)
-
-    def analyze_issue(self, issue: str) -> IssueAnalysis:
-        payload = _build_analysis_payload(issue=issue)
-        return self._generate_structured(payload=payload, schema=IssueAnalysis)
-
-    def create_plan(
-        self,
-        issue: str,
-        analysis: IssueAnalysis,
-        repository_context: RepositoryContext | None = None,
-    ) -> ImplementationPlan:
-        payload = _build_plan_payload(
-            issue=issue,
-            analysis=analysis,
-            repository_context=repository_context,
-        )
-        return self._generate_structured(payload=payload, schema=ImplementationPlan)
-
-    def propose_code_changes(
-        self,
-        issue: str,
-        analysis: IssueAnalysis,
-        plan: ImplementationPlan,
-        target_files: list[SourceFile],
-        repair_context: RepairContext | None = None,
-    ) -> CodeChangeSet:
-        payload = _build_gemini_payload(
-            issue=issue,
-            analysis=analysis,
-            plan=plan,
-            target_files=target_files,
-            repair_context=repair_context,
-        )
-        return self._generate_structured(payload=payload, schema=CodeChangeSet)
-
-    def review_changes(
-        self,
-        issue: str,
-        plan: ImplementationPlan,
-        change_set: CodeChangeSet,
-        diff: str,
-        test_analysis: TestAnalysis,
-        repair_attempts: int = 0,
-    ) -> ReviewResult:
-        payload = _build_review_payload(
-            issue=issue,
-            plan=plan,
-            change_set=change_set,
-            diff=diff,
-            test_analysis=test_analysis,
-            repair_attempts=repair_attempts,
-        )
-        return self._generate_structured(payload=payload, schema=ReviewResult)
-
-    def _generate_structured(self, *, payload: dict[str, object], schema: type[T]) -> T:
-        started = time.perf_counter()
-        retry_count = 0
-        usage_totals = _empty_usage_totals()
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self._model}:generateContent"
-        )
-        request_payload = _with_generation_config(
-            payload=payload,
-            max_output_tokens=self._max_output_tokens,
-            max_prompt_chars=self._max_prompt_chars,
-        )
-        last_parse_error: LLMProviderError | None = None
-
-        for attempt in range(self._max_retries + 1):
-            try:
-                response, http_retries = self._post_with_retries(
-                    url=url,
-                    payload=request_payload,
-                )
-            except LLMProviderError as exc:
-                duration_ms = _duration_ms(started)
-                self._record_usage_event(
-                    usage_totals=usage_totals,
-                    duration_ms=duration_ms,
-                    success=False,
-                    retry_count=retry_count,
-                    error=exc,
-                )
-                raise
-
-            retry_count += http_retries
-            usage_totals = _merge_usage_totals(
-                usage_totals,
-                _extract_gemini_usage_totals(response.json()),
-            )
-            response_payload = response.json()
-            try:
-                parsed = _parse_gemini_structured_output(
-                    payload=response_payload,
-                    schema=schema,
-                    schema_name=schema.__name__,
-                )
-                self._record_usage_event(
-                    usage_totals=usage_totals,
-                    duration_ms=_duration_ms(started),
-                    success=True,
-                    retry_count=retry_count,
-                    error=None,
-                )
-                return parsed
-            except LLMProviderError as exc:
-                last_parse_error = exc
-                if attempt >= self._max_retries:
-                    break
-                retry_count += 1
-                request_payload = _build_schema_repair_payload(
-                    original_payload=request_payload,
-                    schema_name=schema.__name__,
-                    error_message=str(exc),
-                    invalid_response=_safe_extract_gemini_text(response_payload),
-                )
-
-        assert last_parse_error is not None
-        self._record_usage_event(
-            usage_totals=usage_totals,
-            duration_ms=_duration_ms(started),
-            success=False,
-            retry_count=retry_count,
-            error=last_parse_error,
-        )
-        raise last_parse_error
-
-    def _post_with_retries(
-        self,
-        *,
-        url: str,
-        payload: dict[str, object],
-    ) -> tuple[httpx.Response, int]:
-        last_error: httpx.HTTPError | None = None
-        for attempt in range(self._max_retries + 1):
-            try:
-                response = httpx.post(
-                    url,
-                    params={"key": self._api_key},
-                    json=payload,
-                    timeout=self._timeout_seconds,
-                )
-                response.raise_for_status()
-                return response, attempt
-            except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt >= self._max_retries or not _is_retryable_http_error(exc):
-                    raise LLMProviderError(
-                        _format_gemini_http_error(exc, self._model)
-                    ) from exc
-                self._sleep(_retry_delay_seconds(attempt))
-
-        assert last_error is not None
-        raise LLMProviderError(_format_gemini_http_error(last_error, self._model)) from last_error
-
-    def _record_usage_event(
-        self,
-        *,
-        usage_totals: dict[str, int | None],
-        duration_ms: float,
-        success: bool,
-        retry_count: int,
-        error: Exception | None,
-    ) -> None:
-        event = LLMUsageEvent(
-            provider="gemini",
-            model=self._model,
-            role=self._role,
-            usage_source=_usage_source(usage_totals),
-            prompt_tokens=usage_totals["prompt_tokens"],
-            output_tokens=usage_totals["output_tokens"],
-            total_tokens=usage_totals["total_tokens"],
-            estimated_cost_usd=estimate_llm_cost_usd(
-                provider="gemini",
-                model=self._model,
-                prompt_tokens=usage_totals["prompt_tokens"],
-                output_tokens=usage_totals["output_tokens"],
-            ),
-            duration_ms=duration_ms,
-            success=success,
-            retry_count=retry_count,
-            error_type=error.__class__.__name__ if error else None,
-            error_message=str(error) if error else None,
-        )
-        self._usage_events.append(event)
-        record_llm_usage(event)
-
-
-class GroqLLMProvider(LLMProvider):
-    """Groq-backed provider using the OpenAI-compatible chat completions API."""
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        role: str = "coder",
-        timeout_seconds: float = 60.0,
-        max_retries: int = 2,
-        max_output_tokens: int = 8192,
-        max_prompt_chars: int = 120_000,
-        sleep: object = time.sleep,
-    ) -> None:
-        self._api_key = api_key
-        self._model = model
-        self._role = role
-        self._timeout_seconds = timeout_seconds
-        self._max_retries = max(0, max_retries)
-        self._max_output_tokens = max_output_tokens
-        self._max_prompt_chars = max_prompt_chars
-        self._sleep = sleep
-        self._usage_events: list[LLMUsageEvent] = []
-
-    @property
-    def usage_events(self) -> list[LLMUsageEvent]:
-        return list(self._usage_events)
-
-    def analyze_issue(self, issue: str) -> IssueAnalysis:
-        return self._generate_structured(payload=_build_analysis_payload(issue=issue), schema=IssueAnalysis)
-
-    def create_plan(
-        self,
-        issue: str,
-        analysis: IssueAnalysis,
-        repository_context: RepositoryContext | None = None,
-    ) -> ImplementationPlan:
-        payload = _build_plan_payload(
-            issue=issue,
-            analysis=analysis,
-            repository_context=repository_context,
-        )
-        return self._generate_structured(payload=payload, schema=ImplementationPlan)
-
-    def propose_code_changes(
-        self,
-        issue: str,
-        analysis: IssueAnalysis,
-        plan: ImplementationPlan,
-        target_files: list[SourceFile],
-        repair_context: RepairContext | None = None,
-    ) -> CodeChangeSet:
-        payload = _build_gemini_payload(
-            issue=issue,
-            analysis=analysis,
-            plan=plan,
-            target_files=target_files,
-            repair_context=repair_context,
-        )
-        return self._generate_structured(payload=payload, schema=CodeChangeSet)
-
-    def review_changes(
-        self,
-        issue: str,
-        plan: ImplementationPlan,
-        change_set: CodeChangeSet,
-        diff: str,
-        test_analysis: TestAnalysis,
-        repair_attempts: int = 0,
-    ) -> ReviewResult:
-        payload = _build_review_payload(
-            issue=issue,
-            plan=plan,
-            change_set=change_set,
-            diff=diff,
-            test_analysis=test_analysis,
-            repair_attempts=repair_attempts,
-        )
-        return self._generate_structured(payload=payload, schema=ReviewResult)
-
-    def _generate_structured(self, *, payload: dict[str, object], schema: type[T]) -> T:
-        started = time.perf_counter()
-        retry_count = 0
-        usage_totals = _empty_usage_totals()
-        request_payload = _build_groq_request_payload(
-            payload=payload,
-            model=self._model,
-            max_output_tokens=self._max_output_tokens,
-            max_prompt_chars=self._max_prompt_chars,
-        )
-        last_parse_error: LLMProviderError | None = None
-
-        for attempt in range(self._max_retries + 1):
-            try:
-                response, http_retries = self._post_with_retries(payload=request_payload)
-            except LLMProviderError as exc:
-                self._record_usage_event(
-                    usage_totals=usage_totals,
-                    duration_ms=_duration_ms(started),
-                    success=False,
-                    retry_count=retry_count,
-                    error=exc,
-                )
-                raise
-
-            retry_count += http_retries
-            response_payload = response.json()
-            usage_totals = _merge_usage_totals(
-                usage_totals,
-                _extract_openai_usage_totals(response_payload),
-            )
-            try:
-                parsed = _parse_structured_text(
-                    text=_extract_openai_chat_text(response_payload, provider_name="Groq"),
-                    schema=schema,
-                    schema_name=schema.__name__,
-                    provider_name="Groq",
-                )
-                self._record_usage_event(
-                    usage_totals=usage_totals,
-                    duration_ms=_duration_ms(started),
-                    success=True,
-                    retry_count=retry_count,
-                    error=None,
-                )
-                return parsed
-            except LLMProviderError as exc:
-                last_parse_error = exc
-                if attempt >= self._max_retries:
-                    break
-                retry_count += 1
-                request_payload = _build_schema_repair_payload(
-                    original_payload=request_payload,
-                    schema_name=schema.__name__,
-                    error_message=str(exc),
-                    invalid_response=_safe_extract_openai_chat_text(response_payload, provider_name="Groq"),
-                )
-
-        assert last_parse_error is not None
-        self._record_usage_event(
-            usage_totals=usage_totals,
-            duration_ms=_duration_ms(started),
-            success=False,
-            retry_count=retry_count,
-            error=last_parse_error,
-        )
-        raise last_parse_error
-
-    def _post_with_retries(self, *, payload: dict[str, object]) -> tuple[httpx.Response, int]:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        last_error: httpx.HTTPError | None = None
-        for attempt in range(self._max_retries + 1):
-            try:
-                response = httpx.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self._timeout_seconds,
-                )
-                response.raise_for_status()
-                return response, attempt
-            except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt >= self._max_retries or not _is_retryable_http_error(exc):
-                    raise LLMProviderError(_format_provider_http_error(exc, "Groq", self._model)) from exc
-                self._sleep(_retry_delay_seconds(attempt))
-
-        assert last_error is not None
-        raise LLMProviderError(_format_provider_http_error(last_error, "Groq", self._model)) from last_error
-
-    def _record_usage_event(
-        self,
-        *,
-        usage_totals: dict[str, int | None],
-        duration_ms: float,
-        success: bool,
-        retry_count: int,
-        error: Exception | None,
-    ) -> None:
-        event = LLMUsageEvent(
-            provider="groq",
-            model=self._model,
-            role=self._role,
-            usage_source=_usage_source(usage_totals),
-            prompt_tokens=usage_totals["prompt_tokens"],
-            output_tokens=usage_totals["output_tokens"],
-            total_tokens=usage_totals["total_tokens"],
-            estimated_cost_usd=estimate_llm_cost_usd(
-                provider="groq",
-                model=self._model,
-                prompt_tokens=usage_totals["prompt_tokens"],
-                output_tokens=usage_totals["output_tokens"],
-            ),
-            duration_ms=duration_ms,
-            success=success,
-            retry_count=retry_count,
-            error_type=error.__class__.__name__ if error else None,
-            error_message=str(error) if error else None,
-        )
-        self._usage_events.append(event)
-        record_llm_usage(event)
-
-
 def get_llm(role: str, settings: Settings | None = None) -> LLMProvider:
     config = settings or get_settings()
-    provider_name = config.llm_provider.strip().lower()
-
-    if provider_name == "mock":
+    provider = config.llm_provider.strip().lower()
+    if provider == "mock":
         return MockLLMProvider()
-    if provider_name == "gemini":
-        if not config.gemini_api_key:
-            raise ValueError(
-                "GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini."
-            )
-        if not config.llm_model.strip():
-            raise ValueError(
-                "REPO_PILOT_LLM_MODEL is required when REPO_PILOT_LLM_PROVIDER=gemini."
-            )
-        return GeminiLLMProvider(
-            api_key=config.gemini_api_key,
-            model=_model_for_role(config, role),
-            role=role,
-            max_retries=max(0, config.llm_max_retries),
-            max_output_tokens=max(1, config.llm_max_output_tokens),
-            max_prompt_chars=max(1000, config.llm_max_prompt_chars),
-        )
-    if provider_name == "groq":
-        if not config.groq_api_key:
-            raise ValueError(
-                "GROQ_API_KEY is required when REPO_PILOT_LLM_PROVIDER=groq."
-            )
-        if not config.llm_model.strip():
-            raise ValueError(
-                "REPO_PILOT_LLM_MODEL is required when REPO_PILOT_LLM_PROVIDER=groq."
-            )
-        return GroqLLMProvider(
-            api_key=config.groq_api_key,
-            model=_model_for_role(config, role),
-            role=role,
-            max_retries=max(0, config.llm_max_retries),
-            max_output_tokens=max(1, config.llm_max_output_tokens),
-            max_prompt_chars=max(1000, config.llm_max_prompt_chars),
-        )
+    if provider == "openai":
+        from app.core.openai_provider import OpenAILLMProvider
 
-    raise ValueError(
-        f"Unsupported LLM provider '{config.llm_provider}' for role '{role}'. "
-        "This project currently supports REPO_PILOT_LLM_PROVIDER=mock, gemini, or groq."
-    )
+        if not config.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=openai.")
+        return OpenAILLMProvider(
+            api_key=config.openai_api_key,
+            model=_model_for_role(config, role),
+            role=role,
+            max_retries=config.llm_max_retries,
+            max_output_tokens=config.llm_max_output_tokens,
+            max_prompt_chars=config.llm_max_prompt_chars,
+            budget_path=config.llm_budget_path,
+            budget_usd=config.llm_budget_usd,
+            run_budget_usd=config.llm_run_budget_usd,
+        )
+    raise ValueError(f"Unsupported LLM provider '{config.llm_provider}'. Use openai or mock.")
 
 
 def _short_subject(issue: str) -> str:
@@ -709,7 +256,7 @@ PROMPT_VERSION = "2026-10-04"
 
 
 def _build_analysis_payload(issue: str) -> dict[str, object]:
-    return _build_gemini_json_payload(
+    return _build_json_payload(
         role="analyzer",
         task="Analyze a software issue for RepoPilot.",
         rules=[
@@ -735,7 +282,7 @@ def _build_plan_payload(
     analysis: IssueAnalysis,
     repository_context: RepositoryContext | None,
 ) -> dict[str, object]:
-    return _build_gemini_json_payload(
+    return _build_json_payload(
         role="planner",
         task="Create a focused implementation plan for RepoPilot.",
         rules=[
@@ -761,21 +308,23 @@ def _build_plan_payload(
     )
 
 
-def _build_gemini_payload(
+def _build_code_payload(
     issue: str,
     analysis: IssueAnalysis,
     plan: ImplementationPlan,
     target_files: list[SourceFile],
     repair_context: RepairContext | None,
 ) -> dict[str, object]:
-    return _build_gemini_json_payload(
+    return _build_json_payload(
         role="coder",
         task="Return structured source-code changes for RepoPilot.",
         rules=[
             "Return JSON only.",
             "Do not return markdown fences.",
             "Do not return unified diffs.",
-            "Only modify paths included in target_files unless creating a clearly justified new file.",
+            "Every change.path must exactly match one of allowed_target_paths.",
+            "Do not invent alternate routes, nearby filenames, or paths that are not listed in allowed_target_paths.",
+            "If the desired file is missing from allowed_target_paths, return an empty changes list with a summary explaining that more repository context is needed.",
             "For modify actions, proposed_content must be the complete new file content.",
             "Do not omit unchanged parts of modified files.",
             "Use repair_context.test_summary, repair_context.failure_reason, and repair_context.previous_diff when present.",
@@ -795,7 +344,8 @@ def _build_gemini_payload(
             "issue": issue,
             "analysis": analysis.model_dump(),
             "plan": plan.model_dump(),
-            "target_files": [file.model_dump() for file in target_files],
+            "allowed_target_paths": [file.path for file in target_files],
+            "target_files": _source_files_for_prompt(target_files),
             "repair_context": _repair_context_for_prompt(repair_context),
         },
     )
@@ -809,7 +359,7 @@ def _build_review_payload(
     test_analysis: TestAnalysis,
     repair_attempts: int,
 ) -> dict[str, object]:
-    return _build_gemini_json_payload(
+    return _build_json_payload(
         role="reviewer",
         task="Review a tested RepoPilot patch before human approval.",
         rules=[
@@ -836,14 +386,14 @@ def _build_review_payload(
             "issue": issue,
             "plan": plan.model_dump(),
             "change_set": _change_set_for_prompt(change_set),
-            "diff": _truncate_text(diff, 40_000),
+            "diff": diff,
             "test_analysis": _test_analysis_for_prompt(test_analysis),
             "repair_attempts": repair_attempts,
         },
     )
 
 
-def _build_gemini_json_payload(
+def _build_json_payload(
     *,
     role: str,
     task: str,
@@ -859,84 +409,7 @@ def _build_gemini_json_payload(
         "output_schema": output_schema,
         "context": context,
     }
-    return {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": json.dumps(prompt, indent=2),
-                    }
-                ],
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.2,
-        },
-    }
-
-
-def _parse_gemini_structured_output(
-    *,
-    payload: dict[str, object],
-    schema: type[T],
-    schema_name: str,
-) -> T:
-    text = _extract_gemini_text(payload)
-    return _parse_structured_text(
-        text=text,
-        schema=schema,
-        schema_name=schema_name,
-        provider_name="Gemini",
-    )
-
-
-def _parse_structured_text(
-    *,
-    text: str,
-    schema: type[T],
-    schema_name: str,
-    provider_name: str,
-) -> T:
-    try:
-        data = _load_json_document(text)
-    except json.JSONDecodeError as exc:
-        raise LLMProviderError(f"{provider_name} returned malformed JSON.") from exc
-
-    try:
-        return schema.model_validate(data)
-    except ValidationError as exc:
-        raise LLMProviderError(
-            f"{provider_name} returned JSON that does not match {schema_name}."
-        ) from exc
-
-
-def _format_gemini_http_error(exc: httpx.HTTPError, model: str) -> str:
-    return _format_provider_http_error(exc, "Gemini", model)
-
-
-def _format_provider_http_error(exc: httpx.HTTPError, provider_name: str, model: str) -> str:
-    if isinstance(exc, httpx.HTTPStatusError):
-        response_text = exc.response.text.strip()
-        detail = f" Response body: {response_text[:500]}" if response_text else ""
-        return (
-            f"{provider_name} request failed for model '{model}' with "
-            f"{exc.response.status_code} {exc.response.reason_phrase}.{detail}"
-        )
-    return f"{provider_name} request failed for model '{model}': {exc}"
-
-
-def _is_retryable_http_error(exc: httpx.HTTPError) -> bool:
-    if isinstance(exc, httpx.TransportError):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in {408, 429, 500, 502, 503, 504}
-    return False
-
-
-def _retry_delay_seconds(attempt: int) -> float:
-    return min(0.25 * (2 ** attempt), 2.0)
+    return prompt
 
 
 def _model_for_role(config: Settings, role: str) -> str:
@@ -950,182 +423,6 @@ def _model_for_role(config: Settings, role: str) -> str:
     return selected.strip()
 
 
-def _with_generation_config(
-    *,
-    payload: dict[str, object],
-    max_output_tokens: int,
-    max_prompt_chars: int,
-) -> dict[str, object]:
-    capped = deepcopy(payload)
-    _cap_payload_text(capped, max_prompt_chars)
-    generation_config = capped.setdefault("generationConfig", {})
-    if isinstance(generation_config, dict):
-        generation_config["maxOutputTokens"] = max_output_tokens
-    return capped
-
-
-def _build_groq_request_payload(
-    *,
-    payload: dict[str, object],
-    model: str,
-    max_output_tokens: int,
-    max_prompt_chars: int,
-) -> dict[str, object]:
-    capped = deepcopy(payload)
-    _cap_payload_text(capped, max_prompt_chars)
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are RepoPilot's structured software engineering model. "
-                "Return valid JSON only, with no markdown fences or prose."
-            ),
-        }
-    ]
-    messages.extend(_groq_messages_from_gemini_payload(capped))
-    return {
-        "model": model,
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-        "temperature": 0.2,
-        "max_completion_tokens": max_output_tokens,
-    }
-
-
-def _groq_messages_from_gemini_payload(payload: dict[str, object]) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
-    contents = payload.get("contents")
-    if not isinstance(contents, list):
-        return messages
-    for content in contents:
-        if not isinstance(content, dict):
-            continue
-        role = "assistant" if content.get("role") == "model" else "user"
-        parts = content.get("parts")
-        if not isinstance(parts, list):
-            continue
-        text = "\n".join(
-            part["text"]
-            for part in parts
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
-        ).strip()
-        if text:
-            messages.append({"role": role, "content": text})
-    return messages
-
-
-def _cap_payload_text(payload: dict[str, object], max_prompt_chars: int) -> None:
-    contents = payload.get("contents")
-    if not isinstance(contents, list):
-        return
-    for content in contents:
-        if not isinstance(content, dict):
-            continue
-        parts = content.get("parts")
-        if not isinstance(parts, list):
-            continue
-        for part in parts:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                part["text"] = _truncate_text(part["text"], max_prompt_chars)
-
-
-def _build_schema_repair_payload(
-    *,
-    original_payload: dict[str, object],
-    schema_name: str,
-    error_message: str,
-    invalid_response: str | None = None,
-) -> dict[str, object]:
-    repaired = deepcopy(original_payload)
-    repair_text = (
-        "Your previous response could not be parsed. "
-        f"Return corrected JSON only for schema {schema_name}. "
-        "Do not include markdown fences, prose, comments, or trailing text. "
-        f"Parser error: {error_message}\n\n"
-        f"Invalid response excerpt:\n{_truncate_text(invalid_response or '', 12000)}"
-    )
-    contents = repaired.get("contents")
-    if isinstance(contents, list):
-        contents.append(
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": repair_text
-                    }
-                ],
-            }
-        )
-        return repaired
-
-    messages = repaired.setdefault("messages", [])
-    if isinstance(messages, list):
-        messages.append({"role": "user", "content": repair_text})
-    return repaired
-
-
-def _extract_gemini_usage_totals(payload: dict[str, object]) -> dict[str, int | None]:
-    usage = payload.get("usageMetadata")
-    if not isinstance(usage, dict):
-        return _empty_usage_totals()
-    return {
-        "prompt_tokens": _optional_int(usage.get("promptTokenCount")),
-        "output_tokens": _optional_int(usage.get("candidatesTokenCount")),
-        "total_tokens": _optional_int(usage.get("totalTokenCount")),
-    }
-
-
-def _extract_openai_usage_totals(payload: dict[str, object]) -> dict[str, int | None]:
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        return _empty_usage_totals()
-    return {
-        "prompt_tokens": _optional_int(usage.get("prompt_tokens")),
-        "output_tokens": _optional_int(usage.get("completion_tokens")),
-        "total_tokens": _optional_int(usage.get("total_tokens")),
-    }
-
-
-def _empty_usage_totals() -> dict[str, int | None]:
-    return {
-        "prompt_tokens": None,
-        "output_tokens": None,
-        "total_tokens": None,
-    }
-
-
-def _merge_usage_totals(
-    left: dict[str, int | None],
-    right: dict[str, int | None],
-) -> dict[str, int | None]:
-    return {
-        key: _sum_optional_ints(left.get(key), right.get(key))
-        for key in ("prompt_tokens", "output_tokens", "total_tokens")
-    }
-
-
-def _sum_optional_ints(left: int | None, right: int | None) -> int | None:
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return left + right
-
-
-def _usage_source(usage_totals: dict[str, int | None]) -> str:
-    if any(value is not None for value in usage_totals.values()):
-        return "provider"
-    return "unavailable"
-
-
-def _optional_int(value: object) -> int | None:
-    return value if isinstance(value, int) else None
-
-
-def _duration_ms(started: float) -> float:
-    return round((time.perf_counter() - started) * 1000, 4)
-
-
 def _repair_context_for_prompt(repair_context: RepairContext | None) -> dict[str, object] | None:
     if repair_context is None:
         return None
@@ -1136,6 +433,10 @@ def _repair_context_for_prompt(repair_context: RepairContext | None) -> dict[str
     return data
 
 
+def _source_files_for_prompt(target_files: list[SourceFile]) -> list[dict[str, object]]:
+    return [file.model_dump() for file in target_files]
+
+
 def _test_analysis_for_prompt(test_analysis: TestAnalysis) -> dict[str, object]:
     data = test_analysis.model_dump()
     data["summary"] = _truncate_text(str(data.get("summary") or ""), 12_000)
@@ -1144,12 +445,7 @@ def _test_analysis_for_prompt(test_analysis: TestAnalysis) -> dict[str, object]:
 
 
 def _change_set_for_prompt(change_set: CodeChangeSet) -> dict[str, object]:
-    data = change_set.model_dump()
-    data["diff"] = _truncate_text(str(data.get("diff") or ""), 40_000)
-    for change in data.get("changes", []):
-        if isinstance(change, dict) and isinstance(change.get("proposed_content"), str):
-            change["proposed_content"] = _truncate_text(change["proposed_content"], 50_000)
-    return data
+    return change_set.model_dump()
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -1157,120 +453,6 @@ def _truncate_text(text: str, max_chars: int) -> str:
         return text
     omitted = len(text) - max_chars
     return f"{text[:max_chars]}\n\n[truncated {omitted} characters]"
-
-
-def _extract_gemini_text(payload: dict[str, object]) -> str:
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise LLMProviderError("Gemini response did not include candidates.")
-
-    first = candidates[0]
-    if not isinstance(first, dict):
-        raise LLMProviderError("Gemini response candidate is malformed.")
-
-    content = first.get("content")
-    if not isinstance(content, dict):
-        raise LLMProviderError("Gemini response did not include content.")
-
-    parts = content.get("parts")
-    if not isinstance(parts, list) or not parts:
-        raise LLMProviderError("Gemini response did not include text parts.")
-
-    text_parts = [
-        part.get("text")
-        for part in parts
-        if isinstance(part, dict) and isinstance(part.get("text"), str)
-    ]
-    if not text_parts:
-        raise LLMProviderError("Gemini response text was empty.")
-    return "\n".join(text_parts)
-
-
-def _extract_openai_chat_text(payload: dict[str, object], *, provider_name: str) -> str:
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise LLMProviderError(f"{provider_name} response did not include choices.")
-
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise LLMProviderError(f"{provider_name} response choice is malformed.")
-
-    message = first.get("message")
-    if not isinstance(message, dict):
-        raise LLMProviderError(f"{provider_name} response did not include a message.")
-
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise LLMProviderError(f"{provider_name} response text was empty.")
-    return content
-
-
-def _safe_extract_gemini_text(payload: dict[str, object]) -> str | None:
-    try:
-        return _extract_gemini_text(payload)
-    except LLMProviderError:
-        return None
-
-
-def _safe_extract_openai_chat_text(payload: dict[str, object], *, provider_name: str) -> str | None:
-    try:
-        return _extract_openai_chat_text(payload, provider_name=provider_name)
-    except LLMProviderError:
-        return None
-
-
-def _load_json_document(text: str) -> object:
-    stripped = _strip_json_fences(text)
-    decoder = json.JSONDecoder(strict=False)
-    try:
-        return decoder.decode(stripped)
-    except json.JSONDecodeError:
-        extracted = _extract_first_json_document(stripped)
-        if extracted is None:
-            raise
-        return decoder.decode(extracted)
-
-
-def _extract_first_json_document(text: str) -> str | None:
-    start = next((index for index, char in enumerate(text) if char in "{["), None)
-    if start is None:
-        return None
-
-    pairs = {"{": "}", "[": "]"}
-    stack: list[str] = []
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-            continue
-        if char in pairs:
-            stack.append(pairs[char])
-            continue
-        if stack and char == stack[-1]:
-            stack.pop()
-            if not stack:
-                return text[start : index + 1]
-
-    return None
-
-
-def _strip_json_fences(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    return stripped.strip()
 
 
 def _propose_file_change(

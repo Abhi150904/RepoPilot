@@ -198,20 +198,38 @@ def test_run_summarizer_marks_command_errors_as_needing_human_action() -> None:
     assert summary.next_action == "rerun_tests"
 
 
+def test_run_summarizer_marks_unavailable_verification_without_failed_tests() -> None:
+    summary = RunSummarizer().summarize(
+        {
+            "test_analysis": {
+                "status": "unavailable",
+                "summary": "No automated test, lint, or build command was found for this repository.",
+                "failure_reason": "The repository does not define a usable verification command.",
+                "next_action": "inspect_failure",
+            },
+        }
+    )
+
+    assert summary.status == "needs_human"
+    assert summary.tests_passed is None
+    assert "verification is unavailable" in summary.summary.lower()
+    assert summary.next_action == "inspect_failure"
+
+
 def test_run_summarizer_marks_llm_provider_errors_as_needing_human_action() -> None:
     summary = RunSummarizer().summarize(
         {
             "llm_error": {
                 "stage": "coder",
                 "type": "LLMProviderError",
-                "message": "Gemini returned malformed JSON.",
+                "message": "OpenAI returned malformed JSON.",
                 "next_action": "inspect_failure",
             }
         }
     )
 
     assert summary.status == "needs_human"
-    assert "Gemini returned malformed JSON" in summary.summary
+    assert "OpenAI returned malformed JSON" in summary.summary
     assert summary.next_action == "inspect_failure"
 
 
@@ -222,8 +240,8 @@ def test_run_summarizer_includes_compact_run_metrics() -> None:
                 "llm_calls": [
                     {
                         "role": "analyzer",
-                        "provider": "gemini",
-                        "model": "gemini-3.7-pro",
+                        "provider": "openai",
+                        "model": "gpt-5.4-mini",
                         "prompt_tokens": 10,
                         "output_tokens": 5,
                         "total_tokens": 15,
@@ -246,7 +264,7 @@ def test_run_summarizer_includes_compact_run_metrics() -> None:
                         "success": True,
                     }
                 ],
-                "models_by_role": {"analyzer": ["gemini-3.7-pro"]},
+                "models_by_role": {"analyzer": ["gpt-5.4-mini"]},
             }
         }
     )
@@ -255,4 +273,4 @@ def test_run_summarizer_includes_compact_run_metrics() -> None:
     assert summary.metrics is not None
     assert summary.metrics.llm_call_count == 1
     assert summary.metrics.total_tokens == 15
-    assert summary.metrics.models_by_role == {"analyzer": ["gemini-3.7-pro"]}
+    assert summary.metrics.models_by_role == {"analyzer": ["gpt-5.4-mini"]}

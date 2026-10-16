@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import colors from "tailwindcss/colors";
 
 const config: Config = {
   content: [
@@ -13,9 +14,9 @@ const config: Config = {
         surface: "#111419",
         elevated: "#171B22",
         line: "#242A33",
-        cyan: "#38BDF8",
-        lime: "#84CC16",
-        amber: "#F59E0B",
+        cyan: { ...colors.cyan, DEFAULT: "#38BDF8" },
+        lime: { ...colors.lime, DEFAULT: "#84CC16" },
+        amber: { ...colors.amber, DEFAULT: "#F59E0B" },
         coral: "#F87171"
       },
       fontFamily: {

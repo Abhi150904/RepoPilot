@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +11,21 @@ from app.schemas.execution import GitSafetyReport
 import app.services.run_service as service_module
 from app.tools.github import GitHubError
 from app.tools.workspace import WorkspaceError
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/evaluations/suites"),
+    ("get", "/evaluations/runs"),
+    ("post", "/evaluations/runs"),
+    ("get", "/evaluations/runs/example"),
+    ("get", "/evaluations/runs/example/cases"),
+    ("get", "/evaluations/runs/example/metrics"),
+    ("get", "/evaluations/compare?run_ids=one,two"),
+])
+def test_evaluation_api_is_not_exposed(method, path) -> None:
+    client = TestClient(create_app(settings=Settings(_env_file=None)))
+    assert getattr(client, method)(path).status_code == 404
+    assert not any(path.startswith("/evaluations") for path in client.get("/openapi.json").json()["paths"])
 
 
 def test_health_endpoint_returns_ok() -> None:
@@ -502,7 +518,7 @@ def test_publish_rejects_workspace_changed_after_approval(tmp_path, monkeypatch)
     client.post(f"/runs/{started.json()['run_id']}/approve", json={})
 
     (tmp_path / "app.py").write_text("print('changed after approval')\n", encoding="utf-8")
-    response = client.post(f"/runs/{started.json()['run_id']}/publish", json={"mode": "dry_run"})
+    response = client.post(f"/runs/{started.json()['run_id']}/publish", json={"mode": "local"})
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "approval_binding_stale"
@@ -676,10 +692,7 @@ def test_create_run_stores_workspace_errors(monkeypatch) -> None:
     assert run["lifecycle_status"] == "failed"
     assert run["error"]["code"] == "workspace_error"
     assert run["error"]["type"] == "WorkspaceError"
-    assert run["error"]["message"] == (
-        "Workspace operation failed. Check workspace state and permissions."
-    )
-    assert "already exists" not in run["error"]["message"]
+    assert run["error"]["message"] == "Workspace operation failed: Run workspace already exists"
 
 
 def test_failed_run_error_keeps_request_id_and_hides_raw_exception(monkeypatch) -> None:

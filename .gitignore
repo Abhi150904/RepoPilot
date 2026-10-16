@@ -42,3 +42,5 @@ Thumbs.db
 
 .agents/
 design-system/
+
+.pytest_tmp/

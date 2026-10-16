@@ -79,7 +79,11 @@ def clone_repository(
                 path=paths.repository_dir,
                 token=auth_token,
             )
-            _fetch_origin(path=paths.repository_dir, token=auth_token)
+            try:
+                _fetch_origin(path=paths.repository_dir, token=auth_token)
+            except WorkspaceError:
+                if not _has_cached_remote_base(paths.repository_dir):
+                    raise
             return CloneResult(
                 repo=repo,
                 path=paths.repository_dir,
@@ -261,6 +265,10 @@ def _default_remote_base_ref(source: Path) -> str:
     return "HEAD"
 
 
+def _has_cached_remote_base(source: Path) -> bool:
+    return _default_remote_base_ref(source) != "HEAD"
+
+
 def _remote_branch_exists(source: Path, branch_name: str) -> bool:
     result = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/{branch_name}"],
@@ -319,13 +327,13 @@ def _remote_matches_repo(actual_remote: str, repo: str) -> bool:
 
 def _normalize_remote(remote: str) -> str:
     cleaned = remote.strip()
-    cleaned = re.sub(r"^https://[^/@]+:[^/@]+@github\.com/", "https://github.com/", cleaned)
-    cleaned = re.sub(r"^https://[^/@]+@github\.com/", "https://github.com/", cleaned)
-    cleaned = re.sub(r"^git@github\.com:", "https://github.com/", cleaned)
-    cleaned = re.sub(r"^ssh://git@github\.com/", "https://github.com/", cleaned)
+    cleaned = re.sub(r"^https://[^/@]+:[^/@]+@github\.com/", "https://github.com/", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^https://[^/@]+@github\.com/", "https://github.com/", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^git@github\.com:", "https://github.com/", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^ssh://git@github\.com/", "https://github.com/", cleaned, flags=re.IGNORECASE)
     if cleaned.endswith(".git"):
         cleaned = cleaned[:-4]
-    return cleaned.rstrip("/")
+    return cleaned.rstrip("/").lower()
 
 
 def _redact_token(text: str, token: str | None) -> str:

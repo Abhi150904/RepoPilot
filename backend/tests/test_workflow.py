@@ -49,13 +49,64 @@ def test_node_workspace_defaults_to_npm_test_and_local_runner(tmp_path) -> None:
     assert runner == "local"
 
 
+def test_node_workspace_without_test_script_prefers_build_over_stale_next_lint(tmp_path) -> None:
+    import app.graph.workflow as workflow_module
+
+    (tmp_path / "package.json").write_text('{"scripts":{"lint":"next lint","build":"next build"}}\n')
+
+    command = workflow_module._test_command_for_workspace(str(tmp_path), None)
+    runner = workflow_module._test_runner_for_workspace(str(tmp_path), "docker", command)
+
+    assert command == ["npm", "run", "build"]
+    assert runner == "local"
+
+
+def test_node_workspace_without_test_script_prefers_valid_lint(tmp_path) -> None:
+    import app.graph.workflow as workflow_module
+
+    (tmp_path / "package.json").write_text('{"scripts":{"lint":"eslint .","build":"next build"}}\n')
+
+    command = workflow_module._test_command_for_workspace(str(tmp_path), None)
+    runner = workflow_module._test_runner_for_workspace(str(tmp_path), "docker", command)
+
+    assert command == ["npm", "run", "lint"]
+    assert runner == "local"
+
+
+def test_node_workspace_without_test_or_lint_script_uses_build(tmp_path) -> None:
+    import app.graph.workflow as workflow_module
+
+    (tmp_path / "package.json").write_text('{"scripts":{"build":"next build"}}\n')
+
+    command = workflow_module._test_command_for_workspace(str(tmp_path), None)
+
+    assert command == ["npm", "run", "build"]
+
+
+def test_node_workspace_without_verification_script_skips_automated_tests(tmp_path) -> None:
+    import app.graph.workflow as workflow_module
+
+    (tmp_path / "package.json").write_text('{"scripts":{"dev":"next dev","start":"next start"}}\n')
+
+    command = workflow_module._test_command_for_workspace(str(tmp_path), None)
+
+    assert command is None
+
+
 def test_python_workspace_keeps_pytest_docker_default(tmp_path) -> None:
     import app.graph.workflow as workflow_module
 
     command = workflow_module._test_command_for_workspace(str(tmp_path), None)
     runner = workflow_module._test_runner_for_workspace(str(tmp_path), "docker", command)
 
-    assert command == ["python", "-m", "pytest", "-p", "no:cacheprovider"]
+    assert command == [
+        "python",
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp=.pytest_tmp",
+    ]
     assert runner == "docker"
 
 
@@ -199,7 +250,7 @@ def test_workflow_summarizes_analyzer_provider_failure(monkeypatch) -> None:
     import app.graph.workflow as workflow_module
 
     def failing_get_llm(role):
-        raise LLMProviderError("Gemini returned malformed JSON.")
+        raise LLMProviderError("OpenAI returned malformed JSON.")
 
     monkeypatch.setattr(workflow_module, "get_llm", failing_get_llm)
     workflow = build_workflow()
@@ -226,7 +277,7 @@ def test_workflow_summarizes_coder_provider_failure(monkeypatch) -> None:
             target_files,
             repair_context=None,
         ):
-            raise LLMProviderError("Gemini returned JSON that does not match CodeChangeSet.")
+            raise LLMProviderError("OpenAI returned JSON that does not match CodeChangeSet.")
 
     import app.graph.workflow as workflow_module
 
@@ -241,6 +292,45 @@ def test_workflow_summarizes_coder_provider_failure(monkeypatch) -> None:
     assert result["plan"]
     assert result["llm_error"]["stage"] == "coder"
     assert "CodeChangeSet" in result["llm_error"]["message"]
+    assert result["run_summary"]["status"] == "needs_human"
+    assert result["run_summary"]["next_action"] == "inspect_failure"
+    assert "code_changes" not in result
+
+
+def test_workflow_summarizes_coder_validation_failure(monkeypatch) -> None:
+    class InvalidPathCoderLLM(MockLLMProvider):
+        def propose_code_changes(
+            self,
+            issue,
+            analysis,
+            plan,
+            target_files,
+            repair_context=None,
+        ):
+            return CodeChangeSet(
+                summary="Wrong target",
+                changes=[
+                    FileChange(
+                        path="src/unloaded.py",
+                        action="modify",
+                        explanation="The model picked a file outside the loaded context.",
+                        proposed_content="print('wrong')\n",
+                    )
+                ],
+            )
+
+    import app.graph.workflow as workflow_module
+
+    monkeypatch.setattr(workflow_module, "get_llm", lambda role: InvalidPathCoderLLM())
+    workflow = build_workflow()
+
+    result = workflow.invoke(
+        {"issue": "Login endpoint returns 500 when email is missing."}
+    )
+
+    assert result["llm_error"]["stage"] == "coder"
+    assert result["llm_error"]["type"] == "CodeWriterError"
+    assert "unrelated file" in result["llm_error"]["message"]
     assert result["run_summary"]["status"] == "needs_human"
     assert result["run_summary"]["next_action"] == "inspect_failure"
     assert "code_changes" not in result
@@ -283,7 +373,7 @@ def test_workflow_summarizes_reviewer_provider_failure(monkeypatch) -> None:
             test_analysis,
             repair_attempts=0,
         ):
-            raise LLMProviderError("Gemini returned JSON that does not match ReviewResult.")
+            raise LLMProviderError("OpenAI returned JSON that does not match ReviewResult.")
 
     def fake_run_tests_in_docker(workspace_path, command):
         return ExecutionResult(
@@ -1218,7 +1308,7 @@ def test_workflow_records_repair_coder_usage_as_separate_call(monkeypatch) -> No
 
     def run_local_pytest(workspace_path, command):
         completed = subprocess.run(
-            ["python", "-m", "pytest", "-p", "no:cacheprovider"],
+            ["python", "-m", "pytest", "-p", "no:cacheprovider", "--basetemp=.pytest_tmp"],
             cwd=workspace_path,
             capture_output=True,
             text=True,
@@ -1418,7 +1508,7 @@ def test_workflow_fixes_broken_python_fixture_end_to_end(monkeypatch) -> None:
 
     def run_local_pytest(workspace_path, command):
         completed = subprocess.run(
-            ["python", "-m", "pytest", "-p", "no:cacheprovider"],
+            ["python", "-m", "pytest", "-p", "no:cacheprovider", "--basetemp=.pytest_tmp"],
             cwd=workspace_path,
             capture_output=True,
             text=True,

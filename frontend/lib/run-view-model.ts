@@ -10,6 +10,7 @@ import {
   UserCheck
 } from "lucide-react";
 import type { RunStatusResponse } from "@/lib/api";
+import { durationLabel } from "@/lib/run-history";
 
 export type DiffLine = {
   kind: "add" | "remove" | "context";
@@ -47,11 +48,13 @@ export type RunViewModel = {
   review: {
     blockers: number;
     notes: number;
-    confidence: string;
+    status: "Passed" | "Blocked" | "Not run";
     risk: string;
   };
   repairAttempts: string;
   tokens: string;
+  duration: string;
+  usage: { requests: string; models: string; estimatedCost: string };
   verification: Array<{
     label: string;
     verified: boolean;
@@ -86,6 +89,8 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
   const publishResult = dict(result.publish_result);
   const publicationPackage = dict(result.publication_package);
   const llmError = dict(result.llm_error);
+  const summaryMetrics = dict(summary.metrics);
+  const runMetrics = dict(result.run_metrics);
   const hasRun = Boolean(run);
 
   const changedFiles = stringList(result.modified_files);
@@ -102,7 +107,8 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     : stringValue(result.issue) ?? "Live issue-text run";
 
   const testsPassed = booleanValue(summary.tests_passed);
-  const reviewStatus = stringValue(review?.status);
+  const reviewApproved = booleanValue(review?.approved);
+  const reviewStatus = reviewApproved === true ? "approved" : reviewApproved === false ? "blocked" : stringValue(review?.status);
   const approvalApproved = booleanValue(approval?.approved);
   const publishStatus = stringValue(publishResult?.status);
   const lifecycleStatus = run?.lifecycle_status;
@@ -149,6 +155,7 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
       approvalApproved,
       publishStatus,
       hasLlmError: Boolean(llmError),
+      testsPassed,
       hasResponse
     }),
     status: stringValue(summary.status) ?? lifecycleStatus ?? "preview",
@@ -170,11 +177,13 @@ export function buildRunView(run: RunStatusResponse | null): RunViewModel {
     review: {
       blockers: reviewStatus === "blocked" || reviewStatus === "changes_requested" ? 1 : 0,
       notes: reviewStatus ? 2 : 0,
-      confidence: formatMetric(dict(summary.metrics)?.review_confidence ?? dict(result.run_metrics)?.review_confidence, "n/a"),
+      status: reviewStatus === "approved" ? "Passed" : ["blocked", "changes_requested"].includes(reviewStatus ?? "") ? "Blocked" : "Not run",
       risk: firstString(stringValue(review?.risk_level), stringValue(dict(result.analysis)?.risk_level), "n/a")
     },
     repairAttempts: String(numberValue(result.repair_attempts) ?? numberValue(summary.repair_attempts) ?? 0),
-    tokens: formatMetric(dict(summary.metrics)?.tokens ?? dict(result.run_metrics)?.tokens, "n/a"),
+    tokens: tokenMetric(summaryMetrics, runMetrics),
+    duration: run ? durationLabel(run) : "n/a",
+    usage: usageDetails(result, runMetrics),
     verification: [
       { label: "Workspace verified", verified: dict(approvalBinding?.git_safety)?.status === "safe" || approvalBinding?.status === "bound" },
       { label: "Tests passed", verified: testsPassed === true },
@@ -331,6 +340,7 @@ function headlineFor({
   approvalApproved,
   publishStatus,
   hasLlmError,
+  testsPassed,
   hasResponse
 }: {
   lifecycleStatus?: string;
@@ -338,6 +348,7 @@ function headlineFor({
   approvalApproved?: boolean | null;
   publishStatus?: string;
   hasLlmError?: boolean;
+  testsPassed?: boolean | null;
   hasResponse?: boolean;
 }): string {
   if (publishStatus === "published") {
@@ -346,8 +357,14 @@ function headlineFor({
   if (approvalApproved) {
     return "Ready to ship.";
   }
-  if (hasLlmError || summaryStatus === "needs_human") {
+  if (hasLlmError) {
     return "RepoPilot needs your attention.";
+  }
+  if (summaryStatus === "needs_human" && testsPassed === false) {
+    return "Run completed, but approval is blocked.";
+  }
+  if (summaryStatus === "needs_human") {
+    return "Run completed with an inspection note.";
   }
   if (lifecycleStatus === "failed") {
     return "Run failed before completion.";
@@ -472,4 +489,35 @@ function formatMetric(value: unknown, fallback: string): string {
     return value;
   }
   return fallback;
+}
+
+function tokenMetric(
+  summaryMetrics: Record<string, unknown> | null,
+  runMetrics: Record<string, unknown> | null
+): string {
+  return formatMetric(
+    summaryMetrics?.tokens ??
+      summaryMetrics?.total_tokens ??
+      runMetrics?.tokens ??
+      runMetrics?.total_tokens,
+    "n/a"
+  );
+}
+
+function usageDetails(result: Record<string, unknown>, metrics: Record<string, unknown> | null): RunViewModel["usage"] {
+  const rawCalls = Array.isArray(metrics?.llm_calls) ? metrics.llm_calls : result.llm_usage;
+  const calls = Array.isArray(rawCalls) ? rawCalls : [];
+  const models = calls.flatMap((call) => {
+    const model = stringValue(dict(call)?.model);
+    return model ? [model] : [];
+  });
+  const byRole = dict(metrics?.models_by_role);
+  if (byRole) models.push(...Object.values(byRole).flatMap(stringList));
+  const count = numberValue(metrics?.llm_call_count) ?? (Array.isArray(rawCalls) ? calls.length : undefined);
+  const cost = numberValue(metrics?.estimated_cost_usd);
+  return {
+    requests: count === undefined ? "n/a" : String(count),
+    models: [...new Set(models)].join(", ") || "n/a",
+    estimatedCost: cost === undefined ? "n/a" : cost === 0 ? "$0.00" : cost < 0.0001 ? "< $0.0001" : `$${cost.toFixed(4)}`
+  };
 }

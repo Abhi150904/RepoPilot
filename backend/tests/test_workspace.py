@@ -127,6 +127,58 @@ def test_clone_repository_reuses_existing_git_repo(monkeypatch, tmp_path) -> Non
     ]
 
 
+def test_clone_repository_matches_existing_origin_case_insensitively(monkeypatch, tmp_path) -> None:
+    settings = Settings(workspace_root=str(tmp_path / "workspaces"), _env_file=None)
+    repo_dir = tmp_path / "workspaces" / "abhi150904__feedback-capture-app"
+    repo_dir.mkdir(parents=True)
+
+    def fake_run(args, cwd=None, capture_output=True, text=True, check=False):
+        assert cwd == repo_dir
+        if args == ["git", "rev-parse", "--is-inside-work-tree"]:
+            return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if args == ["git", "remote", "get-url", "origin"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/Abhi150904/feedback-capture-app.git\n",
+                stderr="",
+            )
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr(workspace_module.subprocess, "run", fake_run)
+
+    result = clone_repository("abhi150904/feedback-capture-app", settings=settings)
+
+    assert result.cloned is False
+    assert result.path == repo_dir
+
+
+def test_clone_repository_uses_cached_ref_when_fetch_fails(monkeypatch, tmp_path) -> None:
+    settings = Settings(workspace_root=str(tmp_path / "workspaces"), _env_file=None)
+    repo_dir = tmp_path / "workspaces" / "Abhi150904__Wandr"
+    repo_dir.mkdir(parents=True)
+
+    def fake_run(args, cwd=None, capture_output=True, text=True, check=False):
+        assert cwd == repo_dir
+        if args == ["git", "rev-parse", "--is-inside-work-tree"]:
+            return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if args == ["git", "remote", "get-url", "origin"]:
+            return SimpleNamespace(returncode=0, stdout="git@github.com:Abhi150904/Wandr.git\n", stderr="")
+        if args == ["git", "fetch", "--prune", "origin"]:
+            return SimpleNamespace(returncode=128, stdout="", stderr="temporary network failure")
+        if args == ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="origin/main\n", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr(workspace_module.subprocess, "run", fake_run)
+
+    result = clone_repository("Abhi150904/Wandr", settings=settings)
+
+    assert result.cloned is False
+    assert result.path == repo_dir
+
+
 def test_clone_repository_rejects_mismatched_existing_origin(monkeypatch, tmp_path) -> None:
     settings = Settings(workspace_root=str(tmp_path / "workspaces"), _env_file=None)
     repo_dir = tmp_path / "workspaces" / "Abhi150904__Wandr"

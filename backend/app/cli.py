@@ -630,18 +630,16 @@ def _validation_message(exc: ValidationError) -> str:
 def _config_report() -> dict[str, Any]:
     settings = get_settings()
     provider = settings.llm_provider
-    gemini_required = provider.lower() == "gemini"
-    groq_required = provider.lower() == "groq"
-    gemini_configured = bool(getattr(settings, "gemini_api_key", None))
-    groq_configured = bool(getattr(settings, "groq_api_key", None))
+    openai_required = provider.lower() == "openai"
+    openai_configured = bool(getattr(settings, "openai_api_key", None))
     github_configured = bool(settings.github_token)
     database_configured = bool(getattr(settings, "database_url", None))
     inline_run_execution = inline_run_execution_enabled(settings)
     issues = []
-    if gemini_required and not gemini_configured:
-        issues.append("GEMINI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=gemini.")
-    if groq_required and not groq_configured:
-        issues.append("GROQ_API_KEY is required when REPO_PILOT_LLM_PROVIDER=groq.")
+    if openai_required and not openai_configured:
+        issues.append("OPENAI_API_KEY is required when REPO_PILOT_LLM_PROVIDER=openai.")
+    if provider.lower() not in {"mock", "openai"}:
+        issues.append("LLM provider must be openai or mock.")
     issues.extend(deployment_issues(settings))
     warnings = deployment_warnings(settings)
 
@@ -654,15 +652,10 @@ def _config_report() -> dict[str, Any]:
         "public_base_url": settings.public_base_url,
         "llm_provider": provider,
         "llm_model": settings.llm_model,
-        "gemini_api_key": {
-            "required": gemini_required,
-            "configured": gemini_configured,
-            "status": "configured" if gemini_configured else "missing",
-        },
-        "groq_api_key": {
-            "required": groq_required,
-            "configured": groq_configured,
-            "status": "configured" if groq_configured else "missing",
+        "openai_api_key": {
+            "required": openai_required,
+            "configured": openai_configured,
+            "status": "configured" if openai_configured else "missing",
         },
         "github_token": {
             "configured": github_configured,
@@ -693,8 +686,7 @@ def _config_report() -> dict[str, Any]:
 
 
 def _print_config_report(report: dict[str, Any]) -> None:
-    gemini = _dict_or_none(report.get("gemini_api_key")) or {}
-    groq = _dict_or_none(report.get("groq_api_key")) or {}
+    openai = _dict_or_none(report.get("openai_api_key")) or {}
     github = _dict_or_none(report.get("github_token")) or {}
     database = _dict_or_none(report.get("database")) or {}
     worker = _dict_or_none(report.get("worker")) or {}
@@ -710,8 +702,7 @@ def _print_config_report(report: dict[str, Any]) -> None:
         print(f"Public URL: {report['public_base_url']}")
     print(f"LLM provider: {report['llm_provider']}")
     print(f"LLM model: {report['llm_model']}")
-    print(f"Gemini API key: {gemini.get('status', 'unknown')}")
-    print(f"Groq API key: {groq.get('status', 'unknown')}")
+    print(f"OpenAI API key: {openai.get('status', 'unknown')}")
     print(f"GitHub token: {github.get('status', 'unknown')}")
     print(f"Database: {database.get('status', 'unknown')}")
     print(f"Inline run execution: {'enabled' if inline_execution.get('enabled') else 'disabled'}")
@@ -954,3 +945,7 @@ def _first_string(*values: object) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

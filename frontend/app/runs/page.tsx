@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
+import { pollResource } from "@/lib/poll-resource";
 import { ButtonLink } from "@/components/button";
 import { listRuns } from "@/lib/api";
-import { stageForStatus, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
+import { summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
-const filters = ["All", "Running", "Needs review", "Completed", "Failed"];
+const filters = ["All", "Running", "Needs attention", "Completed", "Failed"];
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<StoredRunSummary[]>([]);
@@ -16,38 +17,27 @@ export default function RunsPage() {
   const [filter, setFilter] = useState("All");
 
   useEffect(() => {
-    let active = true;
-    async function loadRuns() {
-      setIsLoading(true);
-      try {
-        const backendRuns = await listRuns();
-        if (active) {
-          setRuns(summariesFromRuns(backendRuns));
-          setLoadError(null);
-        }
-      } catch (caught) {
-        if (active) {
-          setRuns([]);
-          setLoadError(caught instanceof Error ? caught.message : "Could not load runs from the API.");
-        }
-      } finally {
-        if (active) {
-          setIsLoading(false);
-        }
+    setIsLoading(true);
+    return pollResource({
+      load: (signal) => listRuns(signal),
+      onData: (backendRuns) => {
+        setRuns(summariesFromRuns(backendRuns));
+        setLoadError(null);
+        setIsLoading(false);
+      },
+      onError: (caught) => {
+        setLoadError(caught instanceof Error ? caught.message : "Could not load runs from the API.");
+        setIsLoading(false);
       }
-    }
-    loadRuns();
-    return () => {
-      active = false;
-    };
+    });
   }, []);
 
   const visibleRuns = useMemo(() => {
     if (filter === "All") {
       return runs;
     }
-    if (filter === "Needs review") {
-      return runs.filter((run) => run.status === "completed");
+    if (filter === "Needs attention") {
+      return runs.filter((run) => run.needsAttention);
     }
     return runs.filter((run) => run.status.toLowerCase() === filter.toLowerCase());
   }, [filter, runs]);
@@ -83,8 +73,14 @@ export default function RunsPage() {
             <span>Updated</span>
           </div>
           {isLoading ? (
-            <div className="px-5 py-10">
-              <p className="text-sm text-[var(--text-secondary)]">Loading run history...</p>
+            <div className="grid gap-1 px-5 py-4">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div key={index} className="grid min-w-[900px] grid-cols-[1fr_120px_140px_110px_100px_100px_170px] gap-4 py-3">
+                  {Array.from({ length: 7 }).map((__, cell) => (
+                    <span key={cell} className="h-4 animate-pulse rounded bg-white/10" />
+                  ))}
+                </div>
+              ))}
             </div>
           ) : null}
           {!isLoading && loadError ? (
@@ -97,8 +93,8 @@ export default function RunsPage() {
             <Link key={run.runId} href={`/runs/${run.runId}`} className="grid min-w-[900px] grid-cols-[1fr_120px_140px_110px_100px_100px_170px] border-b border-[var(--border)] px-5 py-4 text-sm hover:bg-[var(--surface-elevated)]">
               <span>{run.repository}</span>
               <span className="text-[var(--text-secondary)]">{run.issue}</span>
-              <span>{stageForStatus(run.status)}</span>
-              <span className="text-[var(--text-secondary)]">{run.status}</span>
+              <span>{run.stage}</span>
+              <span className="text-[var(--text-secondary)]">{run.statusLabel}</span>
               <span className="text-[var(--text-secondary)]">{run.tests}</span>
               <span className="text-[var(--text-secondary)]">{run.duration}</span>
               <span className="text-[var(--text-secondary)]">{new Date(run.updatedAt).toLocaleString()}</span>

@@ -1,11 +1,39 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine
 
 from app.api.runs import RunStore
-from app.api.schemas import RunRequest
+from app.api.schemas import PublishRequest, RunRequest
 from app.core.audit import RUN_COMPLETED, RUN_STARTED
-from app.services.run_service import RepoPilotRunService
+from app.core.config import Settings
+from app.services.run_service import RepoPilotRunService, RunServiceError
+
+
+@pytest.mark.parametrize("publication_status", ["publishing", "published"])
+@pytest.mark.parametrize("action", ["approve_run", "reject_run"])
+def test_publication_locks_review_decisions(monkeypatch, publication_status, action) -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            return _reviewed_result(workflow_input["_run_id"])
+
+    import app.services.run_service as service_module
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    service = RepoPilotRunService(run_store=store)
+    run = service.create_run(RunRequest(issue="Review lock test"))
+    service.execute_next_queued()
+    store.mark_publication_status(run.run_id, publication_status, event_type="run.publication_updated")
+    before = service.get_run(run.run_id)
+
+    with pytest.raises(RunServiceError) as caught:
+        getattr(service, action)(run.run_id)
+
+    assert caught.value.status_code == 409
+    assert caught.value.code == "review_locked"
+    assert service.get_run(run.run_id) == before
 
 
 def test_execute_next_queued_claims_and_completes_one_run(monkeypatch) -> None:
@@ -38,6 +66,77 @@ def test_execute_next_queued_claims_and_completes_one_run(monkeypatch) -> None:
         RUN_COMPLETED,
     ]
     assert audit.events[-1]["metadata"]["request_id"] == "trace-1"
+
+
+def test_local_queued_run_uses_local_test_runner(monkeypatch) -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+    captured: dict[str, object] = {}
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            captured.update(workflow_input)
+            return _reviewed_result(workflow_input["_run_id"])
+
+    import app.services.run_service as service_module
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr(
+        service_module,
+        "get_settings",
+        lambda: Settings(deployment_environment="local", _env_file=None),
+    )
+    service = RepoPilotRunService(run_store=store)
+    run = service.create_run(
+        RunRequest(
+            repository="example/demo",
+            issue_number=1,
+            run_tests=True,
+        )
+    )
+
+    completed = service.execute_next_queued()
+
+    assert completed is not None
+    assert completed.run_id == run.run_id
+    assert captured["test_runner"] == "local"
+
+
+def test_publish_dry_run_reports_blockers_without_binding(monkeypatch) -> None:
+    store = RunStore(engine=create_engine("sqlite+pysqlite:///:memory:", future=True))
+
+    class FakeWorkflow:
+        def invoke(self, workflow_input):
+            result = _reviewed_result(workflow_input["_run_id"])
+            result["workspace_path"] = None
+            result["approval_decision"] = {
+                "approved": True,
+                "status": "approved",
+                "summary": "Human approval was provided.",
+                "next_action": "commit_changes",
+            }
+            result["approval_binding"] = {
+                "status": "unavailable",
+                "summary": "Approval could not be bound to workspace contents.",
+                "workspace_path": None,
+                "changed_files": ["app.py"],
+            }
+            result["run_summary"]["status"] = "approved"
+            return result
+
+    import app.services.run_service as service_module
+
+    monkeypatch.setattr(service_module, "build_workflow", lambda: FakeWorkflow())
+    service = RepoPilotRunService(run_store=store)
+    run = service.create_run(RunRequest(issue="First issue"))
+    completed = service.execute_next_queued()
+
+    assert completed is not None
+    updated = service.publish_run(run.run_id, PublishRequest(mode="dry_run"))
+
+    publish_result = updated.response.result["publish_result"]
+    assert publish_result["mode"] == "dry_run"
+    assert publish_result["status"] == "blocked"
+    assert "Git safety report is missing." in publish_result["blockers"]
 
 
 def test_execute_next_queued_returns_none_without_work() -> None:

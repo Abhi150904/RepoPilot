@@ -7,6 +7,14 @@ class TestAnalyzer:
     """Turns raw sandbox execution output into a workflow decision."""
 
     def analyze(self, result: TestResult) -> TestAnalysis:
+        if not result.command:
+            return TestAnalysis(
+                status="unavailable",
+                summary="No automated test, lint, or build command was found for this repository.",
+                failure_reason="The repository does not define a usable verification command.",
+                next_action="inspect_failure",
+            )
+
         if result.timed_out:
             return TestAnalysis(
                 status="timed_out",
