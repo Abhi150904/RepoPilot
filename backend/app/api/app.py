@@ -32,7 +32,7 @@ from app.api.schemas import (
     RunResponse,
     RunStatusResponse,
 )
-from app.core.config import Settings, get_settings, inline_run_execution_enabled, readiness_report
+from app.core.config import Settings, deployment_issues, get_settings, inline_run_execution_enabled, readiness_report, staging_user_allowed
 from app.core.audit import AuditLogger
 from app.core.llm_usage import LLMUsageRecorder
 from app.api.runs import RunLimits, RunStore
@@ -47,6 +47,8 @@ def create_app(
     github_app_service: GitHubAppService | None = None,
 ) -> FastAPI:
     config = settings or get_settings()
+    if config.deployment_environment in {"staging", "production"} and deployment_issues(config):
+        raise ValueError("Invalid deployment configuration: " + " ".join(deployment_issues(config)))
     api = FastAPI(title="RepoPilot API", version="0.1.0")
     api.add_middleware(
         CORSMiddleware,
@@ -188,7 +190,9 @@ def create_app(
 
     @api.get("/auth/github/login")
     def github_login(request: Request) -> RedirectResponse:
-        if _optional_session(request, sessions) is not None:
+        existing = _optional_session(request, sessions)
+        if existing is not None:
+            _check_staging_access(config, existing.user.github_user_id)
             redirect_url = f"{config.public_base_url}/app" if config.public_base_url else "/app"
             return RedirectResponse(redirect_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
         state = sessions.create_oauth_state()
@@ -213,6 +217,7 @@ def create_app(
             )
         access_token = oauth.exchange_code(code=code)
         user = oauth.get_user(access_token=access_token)
+        _check_staging_access(config, user.github_user_id)
         session = sessions.create_session(user=user, oauth_access_token=access_token)
         redirect_url = f"{config.public_base_url}/app" if config.public_base_url else "/app"
         response = RedirectResponse(redirect_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
@@ -233,6 +238,7 @@ def create_app(
         session = _optional_session(request, sessions)
         if session is None:
             return AuthMeResponse(authenticated=False)
+        _check_staging_access(config, session.user.github_user_id)
         return _auth_me_response(session)
 
     @api.get("/github/installations", response_model=list[GitHubInstallationResponse])
@@ -441,12 +447,18 @@ def _require_session(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "authentication_required", "message": "Authentication is required."},
         )
+    _check_staging_access(config, session.user.github_user_id)
     if csrf and request.headers.get("x-csrf-token") != session.csrf_token:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "csrf_failed", "message": "CSRF validation failed."},
         )
     return session
+
+
+def _check_staging_access(config: Settings, github_user_id: int) -> None:
+    if not staging_user_allowed(config, github_user_id):
+        raise HTTPException(status_code=403, detail={"code": "staging_access_denied", "message": "This staging environment is restricted to approved testers."})
 
 
 def _run_owner_for_request(
@@ -468,6 +480,7 @@ def _hosted_initial_request(*, config: Settings, request: RunRequest) -> RunRequ
         return request
     return request.model_copy(
         update={
+            "test_runner": "docker",
             "approved": False,
             "publish_dry_run": False,
             "publish_local": False,

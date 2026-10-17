@@ -18,6 +18,7 @@ from app.agents.repo_explorer import RepoExplorer
 from app.agents.reviewer import Reviewer
 from app.agents.run_summarizer import RunSummarizer
 from app.agents.test_analyzer import TestAnalyzer
+from app.core.config import get_settings
 from app.core.llm import LLMProviderError, MockLLMProvider, get_llm
 from app.graph.state import AgentState
 from app.schemas.code_change import CodeChangeSet, SourceFile
@@ -423,7 +424,7 @@ def _test_runner_for_workspace(
     command: list[str],
 ) -> str:
     workspace = Path(workspace_path)
-    if requested_runner == "docker" and (workspace / "package.json").exists() and command[:1] == ["npm"]:
+    if get_settings().deployment_environment == "local" and requested_runner == "docker" and (workspace / "package.json").exists() and command[:1] == ["npm"]:
         return "local"
     return requested_runner
 

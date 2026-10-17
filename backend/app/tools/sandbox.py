@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import os
+import io
+import logging
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
+from threading import Thread
+from uuid import uuid4
 
 from app.schemas.execution import TestResult
+from app.core.config import get_settings
 
 
 class SandboxError(ValueError):
@@ -27,10 +33,17 @@ def run_tests_in_docker(
 ) -> TestResult:
     workspace = _resolve_workspace(workspace_path)
     _validate_command(command)
+    settings = get_settings()
+    if settings.sandbox_docker_host:
+        return _run_remote_tests(
+            workspace, command,
+            settings.sandbox_image if image == DEFAULT_DOCKER_IMAGE else image,
+            settings.sandbox_docker_host, timeout_seconds, output_limit,
+        )
     docker_command = build_docker_command(
         workspace_path=workspace,
         command=command,
-        image=image,
+        image=get_settings().sandbox_image if image == DEFAULT_DOCKER_IMAGE else image,
     )
 
     try:
@@ -61,6 +74,127 @@ def run_tests_in_docker(
         )
     finally:
         _cleanup_local_test_artifacts(workspace=workspace, command=command)
+
+
+def _workspace_archive(workspace: Path) -> bytes:
+    # Never transfer Git credentials, local secrets, links, or special files.
+    excluded = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".pytest_tmp"}
+    output = io.BytesIO()
+    count = 0
+    size = 0
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for root, directories, files in os.walk(workspace, followlinks=False):
+            directories[:] = sorted(name for name in directories if name not in excluded
+                                     and not (Path(root) / name).is_symlink())
+            for name in sorted(files):
+                path = Path(root) / name
+                if name == ".env" or name.startswith(".env.") or path.suffix in {".pem", ".key"}:
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    raise SandboxError("Sandbox workspace contains a link or special file.")
+                info = archive.gettarinfo(str(path), arcname=path.relative_to(workspace).as_posix())
+                if not info.isfile():
+                    raise SandboxError("Sandbox workspace contains a non-regular file.")
+                count += 1
+                size += info.size
+                if count > 10_000 or size > 64 * 1024 * 1024:
+                    raise SandboxError("Sandbox workspace exceeds the 64 MiB / 10000 file transfer limit.")
+                info.uid = info.gid = 65534
+                info.uname = info.gname = ""
+                info.mode = 0o755 if info.mode & 0o111 else 0o644
+                with path.open("rb") as source:
+                    archive.addfile(info, source)
+    return output.getvalue()
+
+
+def _run_remote_tests(
+    workspace: Path, command: list[str], image: str, host: str,
+    timeout_seconds: int, output_limit: int,
+) -> TestResult:
+    payload = _workspace_archive(workspace)
+    name = f"repopilot-test-{uuid4().hex}"
+    docker = ["docker", "--host", host]
+    # Extraction runs in the sandbox, never on either host. Images must have Python 3.12+.
+    bootstrap = (
+        "import os,sys,tarfile; "
+        "tarfile.open(fileobj=sys.stdin.buffer,mode='r|').extractall('/workspace',filter='data'); "
+        "os.execvp(sys.argv[1],sys.argv[1:])"
+    )
+    args = [*docker, "run", "--rm", "--name", name, "--label", "repopilot.sandbox=true",
+            "--pull=never", "--network", "none", "--cpus", "1", "--memory", "1g",
+            "--memory-swap", "1g", "--pids-limit", "128", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--read-only", "--user", "65534:65534",
+            "--tmpfs", "/workspace:rw,nosuid,nodev,size=256m,mode=1777",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
+            "--log-driver", "none", "-e", "HOME=/tmp", "-e", "CI=true",
+            "-e", "PYTHONDONTWRITEBYTECODE=1", "-w", "/workspace", "-i",
+            "--entrypoint", "python", image, "-c", bootstrap, *command]
+    try:
+        completed = _run_bounded(args, payload, timeout_seconds, output_limit)
+        stdout = _truncate_output(_coerce_output(completed.stdout), output_limit)
+        return TestResult(exit_code=completed.returncode, stdout=stdout,
+                          stderr=_truncate_output(_coerce_output(completed.stderr), output_limit),
+                          timed_out=False, command=command, **_count_pytest_results(stdout))
+    except subprocess.TimeoutExpired as exc:
+        return TestResult(exit_code=124, stdout=_truncate_output(_coerce_output(exc.stdout), output_limit),
+                          stderr=_truncate_output(_coerce_output(exc.stderr), output_limit),
+                          timed_out=True, command=command)
+    finally:
+        # Killing the SSH client alone does not stop its remote container.
+        try:
+            cleanup = subprocess.run([*docker, "rm", "--force", name], capture_output=True,
+                                     timeout=20, check=False)
+            if cleanup.returncode and "No such container" not in _coerce_output(cleanup.stderr):
+                logging.getLogger(__name__).warning("Remote sandbox cleanup failed; inspect execution host.")
+        except (OSError, subprocess.TimeoutExpired):
+            logging.getLogger(__name__).warning("Remote sandbox cleanup failed; inspect execution host.")
+
+
+def _run_bounded(args: list[str], payload: bytes, timeout: int, limit: int) -> subprocess.CompletedProcess:
+    buffers = [bytearray(), bytearray()]
+    process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def drain(stream, buffer: bytearray) -> None:
+        try:
+            while chunk := stream.read(8192):
+                buffer.extend(chunk[:max(0, limit + 1 - len(buffer))])
+        finally:
+            stream.close()
+
+    def feed() -> None:
+        try:
+            process.stdin.write(payload)
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    threads = [Thread(target=drain, args=(process.stdout, buffers[0]), daemon=True),
+               Thread(target=drain, args=(process.stderr, buffers[1]), daemon=True),
+               Thread(target=feed, daemon=True)]
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        for thread in threads:
+            thread.join(timeout=2)
+    stdout, stderr = (bytes(buffer) for buffer in buffers)
+    if timed_out:
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 def run_tests_locally(
@@ -129,6 +263,12 @@ def build_docker_command(
         "1",
         "--memory",
         "1g",
+        "--pids-limit",
+        "128",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
         "-v",
         f"{workspace_path}:/workspace:rw",
         "-w",

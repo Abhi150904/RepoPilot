@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.api.runs import RunStore
 from app.api.schemas import PublishRequest, RunRequest, RunStatusResponse
@@ -407,7 +409,6 @@ def _run_worker_command(args: argparse.Namespace) -> int:
         return 0
     if args.worker_command == "run":
         worker = _persistent_run_service()
-        worker.recover_stale_runs()
         executed = _worker_loop(
             poll_interval=args.poll_interval,
             max_runs=args.max_runs,
@@ -417,7 +418,6 @@ def _run_worker_command(args: argparse.Namespace) -> int:
         return 0
     if args.worker_command == "eval-run":
         worker = _persistent_eval_service()
-        worker.recover_interrupted_runs()
         executed = _eval_worker_loop(
             poll_interval=args.poll_interval,
             max_runs=args.max_runs,
@@ -445,19 +445,12 @@ def _worker_loop(
         raise SystemExit("--max-runs must be at least 1.")
 
     worker = service or _persistent_run_service()
-    executed: list[RunStatusResponse] = []
-    try:
-        while max_runs is None or len(executed) < max_runs:
-            run = worker.execute_next_queued()
-            if run is None:
-                if max_runs is not None:
-                    break
-                time.sleep(poll_interval)
-                continue
-            executed.append(run)
-    except KeyboardInterrupt:
-        pass
-    return executed
+    return _poll_worker(
+        execute_next=worker.execute_next_queued,
+        recover=getattr(worker, "recover_stale_runs", lambda: None),
+        poll_interval=poll_interval,
+        max_runs=max_runs,
+    )
 
 
 def _eval_worker_run_once(service: EvaluationService | None = None):
@@ -477,10 +470,45 @@ def _eval_worker_loop(
         raise SystemExit("--max-runs must be at least 1.")
 
     worker = service or _persistent_eval_service()
+    return _poll_worker(
+        execute_next=worker.execute_next_queued,
+        recover=getattr(worker, "recover_interrupted_runs", lambda: None),
+        poll_interval=poll_interval,
+        max_runs=max_runs,
+    )
+
+
+def _poll_worker(*, execute_next: Callable, recover: Callable, poll_interval: float, max_runs: int | None) -> list:
     executed = []
+    retry_delay = 1.0
+    needs_recovery = True
+    last_recovery = 0.0
     try:
         while max_runs is None or len(executed) < max_runs:
-            run = worker.execute_next_queued()
+            try:
+                if needs_recovery or time.monotonic() - last_recovery >= 60:
+                    recover()
+                    needs_recovery = False
+                    last_recovery = time.monotonic()
+                run = execute_next()
+            except DBAPIError as exc:
+                sqlstate = getattr(exc.orig, "sqlstate", None)
+                disconnected = exc.connection_invalidated or (
+                    isinstance(exc, OperationalError) and (
+                        sqlstate is None or sqlstate.startswith("08") or sqlstate in {"57P01", "57P02", "57P03"}
+                    )
+                )
+                if not disconnected:
+                    raise
+                # Never log connection strings, credentials, or the failed SQL.
+                logging.getLogger("repopilot.worker").warning(
+                    "Database connection unavailable; retrying queue polling in %.0fs.", retry_delay
+                )
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30.0)
+                needs_recovery = True
+                continue
+            retry_delay = 1.0
             if run is None:
                 if max_runs is not None:
                     break

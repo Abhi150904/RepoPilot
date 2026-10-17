@@ -465,7 +465,10 @@ def _workflow_input(request: RunRequest) -> dict[str, Any]:
 
 
 def _test_runner_for_request(request: RunRequest) -> str:
-    if request.test_runner == "docker" and get_settings().deployment_environment == "local":
+    settings = get_settings()
+    if settings.hosted_mode or settings.deployment_environment == "staging":
+        return "docker"
+    if request.test_runner == "docker" and settings.deployment_environment == "local":
         return "local"
     return request.test_runner
 
