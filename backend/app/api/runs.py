@@ -182,6 +182,18 @@ class RunStore:
             idempotency_key=idempotency_key,
         ).run
 
+    def has_unfinished_runs(self) -> bool:
+        """Check the whole queue, without the user-facing list limit."""
+        if self._session_factory:
+            with self._session_factory() as session:
+                return session.scalar(
+                    select(RunRow.run_id)
+                    .where(RunRow.lifecycle_status.in_(["queued", "running"]))
+                    .limit(1)
+                ) is not None
+        with self._lock:
+            return any(run.lifecycle_status in {"queued", "running"} for run in self._runs.values())
+
     def create_result(
         self,
         request: dict[str, Any],

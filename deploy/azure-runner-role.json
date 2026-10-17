@@ -1,0 +1,15 @@
+{
+  "Name": "RepoPilot Runner Power Controller",
+  "IsCustom": true,
+  "Description": "Read power state, start and deallocate the single RepoPilot execution VM. Assign only at that VM scope.",
+  "Actions": [
+    "Microsoft.Compute/virtualMachines/read",
+    "Microsoft.Compute/virtualMachines/instanceView/read",
+    "Microsoft.Compute/virtualMachines/start/action",
+    "Microsoft.Compute/virtualMachines/deallocate/action"
+  ],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": ["/subscriptions/REPLACE_SUBSCRIPTION_ID/resourceGroups/repopilot"]
+}

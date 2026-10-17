@@ -28,6 +28,7 @@ from app.evals import runner as eval_runner
 from app.evals.service import EvaluationService
 from app.evals.store import EvaluationStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
+from app.services.runner_lifecycle import RunnerUnavailable, runner_controller
 
 
 EXAMPLE_ISSUE = "Login endpoint returns 500 when email is missing."
@@ -395,6 +396,8 @@ def _publish_request_mode(mode: str) -> str:
 
 
 def _run_worker_command(args: argparse.Namespace) -> int:
+    if getattr(get_settings(), "azure_runner_enabled", False) and args.worker_command != "run":
+        raise SystemExit("Azure runner automation requires the single continuous 'worker run' process; stop it before manual/evaluation workers.")
     if args.worker_command == "run-once":
         worker = _persistent_run_service()
         worker.recover_stale_runs()
@@ -445,12 +448,18 @@ def _worker_loop(
         raise SystemExit("--max-runs must be at least 1.")
 
     worker = service or _persistent_run_service()
-    return _poll_worker(
-        execute_next=worker.execute_next_queued,
-        recover=getattr(worker, "recover_stale_runs", lambda: None),
-        poll_interval=poll_interval,
-        max_runs=max_runs,
-    )
+    with runner_controller(get_settings()) as controller:
+        def execute_next():
+            if controller is not None and not controller.tick(worker.run_store.has_unfinished_runs()):
+                return None
+            return worker.execute_next_queued()
+
+        return _poll_worker(
+            execute_next=execute_next,
+            recover=getattr(worker, "recover_stale_runs", lambda: None),
+            poll_interval=poll_interval,
+            max_runs=max_runs,
+        )
 
 
 def _eval_worker_run_once(service: EvaluationService | None = None):
@@ -491,6 +500,10 @@ def _poll_worker(*, execute_next: Callable, recover: Callable, poll_interval: fl
                     needs_recovery = False
                     last_recovery = time.monotonic()
                 run = execute_next()
+            except RunnerUnavailable as exc:
+                logging.getLogger("repopilot.worker").warning("%s", exc)
+                time.sleep(30)
+                continue
             except DBAPIError as exc:
                 sqlstate = getattr(exc.orig, "sqlstate", None)
                 disconnected = exc.connection_invalidated or (

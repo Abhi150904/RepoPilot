@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     staging_github_user_ids: str = ""
     sandbox_image: str = "python:3.11-slim"
     sandbox_docker_host: str | None = None
+    azure_runner_enabled: bool = False
+    azure_runner_resource_id: str | None = None
+    azure_runner_idle_seconds: int = Field(default=600, ge=60)
+    azure_runner_boot_timeout_seconds: int = Field(default=600, ge=30, le=1800)
+    azure_runner_lock_path: str = "/opt/repopilot/data/runner-controller.lock"
 
     @field_validator("sandbox_docker_host")
     @classmethod
@@ -266,6 +271,15 @@ def deployment_warnings(settings: Settings) -> list[str]:
 
 def deployment_issues(settings: Settings) -> list[str]:
     issues: list[str] = []
+    if getattr(settings, "azure_runner_enabled", False):
+        from app.services.runner_lifecycle import valid_vm_resource_id
+
+        if not valid_vm_resource_id(settings.azure_runner_resource_id):
+            issues.append("Azure runner automation requires a valid runner VM resource ID.")
+        if not settings.sandbox_docker_host or not settings.database_url:
+            issues.append("Azure runner automation requires a remote SSH sandbox and durable database.")
+        if inline_run_execution_enabled(settings):
+            issues.append("Azure runner automation requires a separate worker; inline execution must be disabled.")
     if settings.deployment_environment == "production":
         if not settings.hosted_mode:
             issues.append("Production requires hosted mode.")

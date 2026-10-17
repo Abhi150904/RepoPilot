@@ -293,6 +293,10 @@ For restricted Phase 20 staging deployment, see [deploy/STAGING.md](deploy/STAGI
 
 For the Vercel frontend and separate AWS execution-host deployment, see
 [deploy/AWS.md](deploy/AWS.md). Cloud resources are not provisioned by these files.
+
+For Azure on-demand runner startup/idle deallocation and a credit-budget worksheet,
+see [deploy/AZURE.md](deploy/AZURE.md). Automation is opt-in and requires a
+VM-scoped app-host managed identity, a prepared runner, and live isolation checks.
 It includes the Docker Compose topology, GitHub tester allowlist, shared workspace
 requirements, rollback guidance, and live acceptance checks. It is not a public
 multi-tenant deployment or a completed cloud provisioning step.
