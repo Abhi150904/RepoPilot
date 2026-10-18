@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { ArtifactWorkspace, RunIntelligence, RunTimeline } from "@/components/run-panels";
 import { ButtonLink } from "@/components/button";
+import { RunUnavailable } from "@/components/run-unavailable";
 import { getRun, type RunStatusResponse } from "@/lib/api";
 import { buildRunView } from "@/lib/run-view-model";
 import { pollResource, runNeedsRefresh } from "@/lib/poll-resource";
@@ -16,7 +17,7 @@ export default function RunDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const isLoading = !run && !error;
   const view = useMemo(() => buildRunView(run), [run]);
-  const canOpenReview = view.canReview && view.tests.passed === true;
+  const canOpenReview = Boolean(run) && !error && view.canReview && view.tests.passed === true;
 
   useEffect(() => {
     setRun(null);
@@ -27,10 +28,17 @@ export default function RunDetailPage() {
         setRun(response);
         setError(null);
       },
-      onError: (caught) => setError(caught instanceof Error ? caught.message : "Could not load run."),
+      onError: (caught) => {
+        setRun(null);
+        setError(caught instanceof Error ? caught.message : "Could not load run.");
+      },
       shouldPoll: runNeedsRefresh
     });
   }, [id]);
+
+  if (error) {
+    return <AppShell><RunUnavailable message={error} /></AppShell>;
+  }
 
   return (
     <AppShell>

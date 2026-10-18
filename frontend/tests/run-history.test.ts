@@ -3,6 +3,54 @@ import { summaryFromRun } from "@/lib/run-history";
 import type { RunStatusResponse } from "@/lib/api";
 
 describe("summaryFromRun", () => {
+  function reviewedRun(approval: Record<string, unknown>): RunStatusResponse {
+    return {
+      run_id: "approval-state",
+      lifecycle_status: "completed",
+      publication_status: "not_started",
+      request: { repository: "example/demo", issue_number: 3 },
+      response: {
+        status: "awaiting_approval", next_action: "human_review", summary: "Waiting for approval.",
+        run_summary: { tests_passed: true },
+        result: { review_result: { approved: true }, approval_decision: approval }
+      }
+    };
+  }
+
+  it("does not mistake approved=false while awaiting approval for rejection", () => {
+    const summary = summaryFromRun(reviewedRun({ approved: false, status: "awaiting_approval" }));
+    expect(summary.stage).toBe("Ready for approval");
+    expect(summary.statusLabel).toBe("awaiting approval");
+    expect(summary.needsAttention).toBe(true);
+  });
+
+  it("distinguishes automated approval blockers from explicit human rejection", () => {
+    const summary = summaryFromRun(reviewedRun({
+      approved: false, status: "not_ready", summary: "Automated review did not approve the patch."
+    }));
+    expect(summary.stage).toBe("Approval blocked");
+    expect(summary.statusLabel).toBe("approval blocked");
+    expect(summary.needsAttention).toBe(false);
+  });
+
+  it("still labels an explicit human rejection as rejected", () => {
+    const summary = summaryFromRun(reviewedRun({
+      approved: false, status: "not_ready", summary: "Human reviewer rejected this run."
+    }));
+    expect(summary.stage).toBe("Rejected");
+    expect(summary.statusLabel).toBe("rejected");
+    expect(summary.needsAttention).toBe(false);
+  });
+
+  it("preserves approved and published stages", () => {
+    const run = reviewedRun({ approved: true, status: "approved" });
+    expect(summaryFromRun(run).stage).toBe("Approved");
+    run.publication_status = "published";
+    run.response!.result.publish_result = { status: "published" };
+    expect(summaryFromRun(run).stage).toBe("Published");
+    expect(summaryFromRun(run).statusLabel).toBe("published");
+  });
+
   it("does not keep completed failed-test runs in the attention queue", () => {
     const run: RunStatusResponse = {
       run_id: "run-failed-tests",

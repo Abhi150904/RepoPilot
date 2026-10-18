@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { ReviewPanel } from "@/components/run-panels";
 import { ButtonLink } from "@/components/button";
+import { RunUnavailable } from "@/components/run-unavailable";
 import { approveRun, getRun, publishRun, rejectRun, type PublishMode, type RunStatusResponse } from "@/lib/api";
 import { buildRunView } from "@/lib/run-view-model";
 
@@ -19,6 +20,8 @@ export default function ReviewPage() {
 
   useEffect(() => {
     let cancelled = false;
+    setRun(null);
+    setError(null);
     async function load() {
       try {
         const response = await getRun(id);
@@ -55,6 +58,14 @@ export default function ReviewPage() {
       setBusy(false);
       setActiveAction(null);
     }
+  }
+
+  if (!run) {
+    return (
+      <AppShell>
+        {error ? <RunUnavailable message={error} /> : <p role="status">Loading run...</p>}
+      </AppShell>
+    );
   }
 
   return (
