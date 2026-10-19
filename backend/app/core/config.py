@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +81,34 @@ class Settings(BaseSettings):
     llm_budget_path: str = ".repopilot/openai-budget.sqlite"
     user_max_active_runs: int = Field(default=1, ge=1)
     user_max_daily_runs: int = Field(default=5, ge=1)
+    staging_github_user_ids: str = ""
+    sandbox_image: str = "python:3.11-slim"
+    sandbox_docker_host: str | None = None
+    azure_runner_enabled: bool = False
+    azure_runner_resource_id: str | None = None
+    azure_runner_idle_seconds: int = Field(default=600, ge=60)
+    azure_runner_boot_timeout_seconds: int = Field(default=600, ge=30, le=1800)
+    azure_runner_lock_path: str = "/opt/repopilot/data/runner-controller.lock"
+
+    @field_validator("sandbox_docker_host")
+    @classmethod
+    def validate_sandbox_host(cls, value: str | None) -> str | None:
+        if value is not None:
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(value)
+            if (parsed.scheme != "ssh" or not parsed.hostname or not parsed.username
+                    or parsed.password or parsed.path or parsed.query or parsed.fragment):
+                raise ValueError("Sandbox Docker host must be ssh://user@host[:port].")
+        return value
+
+    @field_validator("staging_github_user_ids")
+    @classmethod
+    def validate_staging_users(cls, value: str) -> str:
+        ids = [item.strip() for item in value.split(",") if item.strip()]
+        if any(not item.isascii() or not item.isdigit() or int(item) <= 0 for item in ids):
+            raise ValueError("Staging access requires comma-separated positive GitHub user IDs.")
+        return ",".join(str(int(item)) for item in ids)
     github_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("GITHUB_TOKEN", "REPOPILOT_GITHUB_TOKEN"),
@@ -243,6 +271,37 @@ def deployment_warnings(settings: Settings) -> list[str]:
 
 def deployment_issues(settings: Settings) -> list[str]:
     issues: list[str] = []
+    if getattr(settings, "azure_runner_enabled", False):
+        from app.services.runner_lifecycle import valid_vm_resource_id
+
+        if not valid_vm_resource_id(settings.azure_runner_resource_id):
+            issues.append("Azure runner automation requires a valid runner VM resource ID.")
+        if not settings.sandbox_docker_host or not settings.database_url:
+            issues.append("Azure runner automation requires a remote SSH sandbox and durable database.")
+        if inline_run_execution_enabled(settings):
+            issues.append("Azure runner automation requires a separate worker; inline execution must be disabled.")
+    if settings.deployment_environment == "production":
+        if not settings.hosted_mode:
+            issues.append("Production requires hosted mode.")
+        if not settings.sandbox_docker_host:
+            issues.append("Production requires an isolated SSH sandbox Docker host.")
+        if inline_run_execution_enabled(settings):
+            issues.append("Production requires a separate worker; inline execution must be disabled.")
+        if not settings.public_base_url or not settings.public_base_url.startswith("https://"):
+            issues.append("Production requires an HTTPS public frontend URL.")
+        if not settings.github_oauth_callback_url or not settings.github_oauth_callback_url.startswith("https://"):
+            issues.append("Production requires an HTTPS GitHub OAuth callback URL.")
+    if settings.deployment_environment == "staging":
+        if not settings.hosted_mode:
+            issues.append("Staging requires hosted mode.")
+        if not settings.staging_github_user_ids:
+            issues.append("REPOPILOT_STAGING_GITHUB_USER_IDS is required for restricted staging access.")
+        if not settings.public_base_url or not settings.public_base_url.startswith("https://"):
+            issues.append("Staging requires an HTTPS public frontend URL.")
+        if not settings.github_oauth_callback_url or not settings.github_oauth_callback_url.startswith("https://"):
+            issues.append("Staging requires an HTTPS GitHub OAuth callback URL.")
+        if inline_run_execution_enabled(settings):
+            issues.append("Staging requires a separate worker; inline execution must be disabled.")
     if settings.hosted_mode and settings.github_token:
         issues.append("REPO_PILOT_HOSTED_MODE=true cannot be used with a personal GitHub token.")
     if settings.hosted_mode and "*" in _cors_origins(settings.cors_origins):
@@ -286,6 +345,10 @@ def inline_run_execution_enabled(settings: Settings) -> bool:
     if inline_setting is not None:
         return bool(inline_setting)
     return not settings.hosted_mode
+
+
+def staging_user_allowed(settings: Settings, github_user_id: int) -> bool:
+    return settings.deployment_environment != "staging" or str(github_user_id) in settings.staging_github_user_ids.split(",")
 
 
 def _cors_origins(value: str) -> list[str]:

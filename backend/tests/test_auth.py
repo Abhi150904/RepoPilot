@@ -260,6 +260,42 @@ def test_hosted_creation_enforces_quota_and_allows_idempotent_replay() -> None:
     assert client.get("/evaluations/suites").status_code == 404
 
 
+def _staging_settings() -> Settings:
+    return _hosted_settings().model_copy(update={
+        "deployment_environment": "staging",
+        "inline_run_execution": False,
+        "database_url": "sqlite+pysqlite:///:memory:",
+        "staging_github_user_ids": "101",
+        "public_base_url": "https://frontend.test",
+        "github_oauth_callback_url": "https://api.test/auth/github/callback",
+    })
+
+
+def test_staging_allows_approved_tester_and_rechecks_existing_sessions() -> None:
+    settings = _staging_settings()
+    client = _authenticated_client(settings=settings)
+    assert client.get("/auth/me").json()["authenticated"] is True
+    settings.staging_github_user_ids = "202"
+    assert client.get("/auth/me").status_code == 403
+    assert client.get("/runs").status_code == 403
+    assert client.get("/github/repositories").status_code == 403
+
+
+def test_staging_blocks_unapproved_login_before_creating_session() -> None:
+    client = _authenticated_client(settings=_staging_settings(), user=GitHubUser(202, "unapproved"))
+    assert not client.get("/auth/me").json()["authenticated"]
+    assert "repopilot_session" not in client.cookies
+    assert client.get("/runs").status_code == 401
+
+
+def test_staging_refuses_to_start_without_access_restriction() -> None:
+    import pytest
+
+    settings = _staging_settings().model_copy(update={"staging_github_user_ids": ""})
+    with pytest.raises(ValueError, match="STAGING_GITHUB_USER_IDS"):
+        create_app(settings=settings)
+
+
 def test_github_repository_listing_never_returns_installation_token() -> None:
     client = _authenticated_client(app_service=FakeGitHubAppService(installation_token="install-secret"))
 

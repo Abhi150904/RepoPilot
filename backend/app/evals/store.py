@@ -123,7 +123,7 @@ class EvalRunCreateResult:
 
 class EvaluationStore:
     def __init__(self, database_url: str | None = None, engine: Engine | None = None) -> None:
-        self._engine = engine or (create_engine(database_url, future=True) if database_url else create_engine("sqlite+pysqlite:///:memory:", future=True))
+        self._engine = engine or (create_engine(database_url, future=True, pool_pre_ping=True, pool_recycle=300) if database_url else create_engine("sqlite+pysqlite:///:memory:", future=True))
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         if engine is not None or database_url is None or database_url.startswith("sqlite"):
             EvaluationBase.metadata.create_all(self._engine)

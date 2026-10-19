@@ -31,8 +31,7 @@ export function summaryFromRun(run: RunStatusResponse): StoredRunSummary {
   const review = objectValue(result.review_result);
   const approval = objectValue(result.approval_decision);
   const approvalStatus = stringValue(approval?.status);
-  const isRejected = approval?.approved === false || approvalStatus === "not_ready";
-  const hasFinalApprovalDecision = approval?.approved === true || isRejected;
+  const hasFinalApprovalDecision = approval?.approved === true || approvalStatus === "not_ready" || isHumanRejection(approval);
   const hasLlmError = Boolean(objectValue(result.llm_error)) || isProviderLimitError(run);
   const testsPassed = run.response?.run_summary?.tests_passed;
   const repository = stringValue(result.repository) ?? String(run.request.repository ?? "Issue text");
@@ -105,11 +104,17 @@ export function stageForRun(run: RunStatusResponse | StoredRunSummary): string {
     return "Published";
   }
   const approval = objectValue(result.approval_decision);
-  if (approval?.approved === false || stringValue(approval?.status) === "not_ready") {
+  if (isHumanRejection(approval)) {
     return "Rejected";
+  }
+  if (stringValue(approval?.status) === "not_ready") {
+    return "Approval blocked";
   }
   if (approval?.approved === true) {
     return "Approved";
+  }
+  if (stringValue(approval?.status) === "awaiting_approval") {
+    return "Ready for approval";
   }
   if (objectValue(result.review_result)) {
     return "Review";
@@ -122,13 +127,24 @@ function statusLabel(run: RunStatusResponse): string {
     return "rate limited";
   }
   const approval = objectValue(run.response?.result?.approval_decision);
-  if (approval?.approved === false || stringValue(approval?.status) === "not_ready") {
+  if (isHumanRejection(approval)) {
     return "rejected";
   }
   if (run.publication_status && run.publication_status !== "not_started") {
     return run.publication_status.replace("_", " ");
   }
+  if (stringValue(approval?.status) === "not_ready") {
+    return "approval blocked";
+  }
+  if (run.lifecycle_status === "completed" && stringValue(approval?.status) === "awaiting_approval") {
+    return "awaiting approval";
+  }
   return run.lifecycle_status;
+}
+
+function isHumanRejection(approval: Record<string, unknown> | null): boolean {
+  // The backend uses not_ready for both automated blockers and human rejection.
+  return approval?.status === "not_ready" && approval?.summary === "Human reviewer rejected this run.";
 }
 
 function testsLabel(run: RunStatusResponse): string {

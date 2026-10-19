@@ -161,7 +161,7 @@ class RunStore:
     def __init__(self, database_url: str | None = None, engine: Engine | None = None) -> None:
         self._runs: dict[str, RunRecord] = {}
         self._lock = Lock()
-        self._engine = engine or (create_engine(database_url, future=True) if database_url else None)
+        self._engine = engine or (create_engine(database_url, future=True, pool_pre_ping=True, pool_recycle=300) if database_url else None)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False) if self._engine else None
         if self._engine:
             if engine is not None or (database_url and database_url.startswith("sqlite")):
@@ -181,6 +181,18 @@ class RunStore:
             owner=owner,
             idempotency_key=idempotency_key,
         ).run
+
+    def has_unfinished_runs(self) -> bool:
+        """Check the whole queue, without the user-facing list limit."""
+        if self._session_factory:
+            with self._session_factory() as session:
+                return session.scalar(
+                    select(RunRow.run_id)
+                    .where(RunRow.lifecycle_status.in_(["queued", "running"]))
+                    .limit(1)
+                ) is not None
+        with self._lock:
+            return any(run.lifecycle_status in {"queued", "running"} for run in self._runs.values())
 
     def create_result(
         self,

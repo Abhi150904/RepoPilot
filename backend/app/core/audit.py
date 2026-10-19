@@ -72,7 +72,7 @@ class AuditLogger:
         engine: Engine | None = None,
     ) -> None:
         self._logger = logger or logging.getLogger("repopilot.audit")
-        self._engine = engine or (create_engine(database_url, future=True) if database_url else None)
+        self._engine = engine or (create_engine(database_url, future=True, pool_pre_ping=True, pool_recycle=300) if database_url else None)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False) if self._engine else None
         if self._engine and (engine is not None or (database_url and database_url.startswith("sqlite"))):
             Base.metadata.create_all(self._engine)

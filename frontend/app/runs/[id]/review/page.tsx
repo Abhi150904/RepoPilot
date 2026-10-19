@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { ReviewPanel } from "@/components/run-panels";
 import { ButtonLink } from "@/components/button";
+import { RunUnavailable } from "@/components/run-unavailable";
 import { approveRun, getRun, publishRun, rejectRun, type PublishMode, type RunStatusResponse } from "@/lib/api";
 import { buildRunView } from "@/lib/run-view-model";
 
-export default function ReviewPage({ params }: { params: { id: string } }) {
+export default function ReviewPage() {
+  const { id } = useParams<{ id: string }>();
   const [run, setRun] = useState<RunStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -17,9 +20,11 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     let cancelled = false;
+    setRun(null);
+    setError(null);
     async function load() {
       try {
-        const response = await getRun(params.id);
+        const response = await getRun(id);
         if (!cancelled) {
           setRun(response);
         }
@@ -33,7 +38,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     return () => {
       cancelled = true;
     };
-  }, [params.id]);
+  }, [id]);
 
   async function mutate(action: "approve" | "reject" | PublishMode) {
     setBusy(true);
@@ -41,11 +46,11 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     setError(null);
     try {
       if (action === "approve") {
-        setRun(await approveRun(params.id));
+        setRun(await approveRun(id));
       } else if (action === "reject") {
-        setRun(await rejectRun(params.id));
+        setRun(await rejectRun(id));
       } else {
-        setRun(await publishRun(params.id, action));
+        setRun(await publishRun(id, action));
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Run action failed.");
@@ -53,6 +58,14 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
       setBusy(false);
       setActiveAction(null);
     }
+  }
+
+  if (!run) {
+    return (
+      <AppShell>
+        {error ? <RunUnavailable message={error} /> : <p role="status">Loading run...</p>}
+      </AppShell>
+    );
   }
 
   return (
@@ -69,7 +82,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
                 : "RepoPilot did not produce a passing review package for this run."}
             </p>
             <div className="mt-5">
-              <ButtonLink href={`/runs/${params.id}`} variant="primary">Inspect run</ButtonLink>
+              <ButtonLink href={`/runs/${id}`} variant="primary">Inspect run</ButtonLink>
             </div>
           </section>
         ) : (

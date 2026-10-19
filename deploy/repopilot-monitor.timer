@@ -1,0 +1,11 @@
+[Unit]
+Description=Check RepoPilot production every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=repopilot-monitor.service
+
+[Install]
+WantedBy=timers.target

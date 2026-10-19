@@ -2,33 +2,43 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { ArtifactWorkspace, RunIntelligence, RunTimeline } from "@/components/run-panels";
 import { ButtonLink } from "@/components/button";
+import { RunUnavailable } from "@/components/run-unavailable";
 import { getRun, type RunStatusResponse } from "@/lib/api";
 import { buildRunView } from "@/lib/run-view-model";
 import { pollResource, runNeedsRefresh } from "@/lib/poll-resource";
 
-export default function RunDetailPage({ params }: { params: { id: string } }) {
+export default function RunDetailPage() {
+  const { id } = useParams<{ id: string }>();
   const [run, setRun] = useState<RunStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isLoading = !run && !error;
   const view = useMemo(() => buildRunView(run), [run]);
-  const canOpenReview = view.canReview && view.tests.passed === true;
+  const canOpenReview = Boolean(run) && !error && view.canReview && view.tests.passed === true;
 
   useEffect(() => {
     setRun(null);
     setError(null);
     return pollResource({
-      load: (signal) => getRun(params.id, signal),
+      load: (signal) => getRun(id, signal),
       onData: (response) => {
         setRun(response);
         setError(null);
       },
-      onError: (caught) => setError(caught instanceof Error ? caught.message : "Could not load run."),
+      onError: (caught) => {
+        setRun(null);
+        setError(caught instanceof Error ? caught.message : "Could not load run.");
+      },
       shouldPoll: runNeedsRefresh
     });
-  }, [params.id]);
+  }, [id]);
+
+  if (error) {
+    return <AppShell><RunUnavailable message={error} /></AppShell>;
+  }
 
   return (
     <AppShell>
@@ -49,7 +59,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
             )}
           </div>
           {canOpenReview ? (
-            <ButtonLink href={`/runs/${params.id}/review`} variant="primary">Review run</ButtonLink>
+            <ButtonLink href={`/runs/${id}/review`} variant="primary">Review run</ButtonLink>
           ) : (
             <span className="inline-flex min-h-10 items-center rounded-lg border border-[var(--border)] px-3.5 text-sm text-[var(--text-secondary)]">
               Review unavailable

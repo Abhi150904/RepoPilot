@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shlex
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.api.runs import RunStore
 from app.api.schemas import PublishRequest, RunRequest, RunStatusResponse
@@ -26,6 +28,7 @@ from app.evals import runner as eval_runner
 from app.evals.service import EvaluationService
 from app.evals.store import EvaluationStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
+from app.services.runner_lifecycle import RunnerUnavailable, runner_controller
 
 
 EXAMPLE_ISSUE = "Login endpoint returns 500 when email is missing."
@@ -393,6 +396,8 @@ def _publish_request_mode(mode: str) -> str:
 
 
 def _run_worker_command(args: argparse.Namespace) -> int:
+    if getattr(get_settings(), "azure_runner_enabled", False) and args.worker_command != "run":
+        raise SystemExit("Azure runner automation requires the single continuous 'worker run' process; stop it before manual/evaluation workers.")
     if args.worker_command == "run-once":
         worker = _persistent_run_service()
         worker.recover_stale_runs()
@@ -407,7 +412,6 @@ def _run_worker_command(args: argparse.Namespace) -> int:
         return 0
     if args.worker_command == "run":
         worker = _persistent_run_service()
-        worker.recover_stale_runs()
         executed = _worker_loop(
             poll_interval=args.poll_interval,
             max_runs=args.max_runs,
@@ -417,7 +421,6 @@ def _run_worker_command(args: argparse.Namespace) -> int:
         return 0
     if args.worker_command == "eval-run":
         worker = _persistent_eval_service()
-        worker.recover_interrupted_runs()
         executed = _eval_worker_loop(
             poll_interval=args.poll_interval,
             max_runs=args.max_runs,
@@ -445,19 +448,18 @@ def _worker_loop(
         raise SystemExit("--max-runs must be at least 1.")
 
     worker = service or _persistent_run_service()
-    executed: list[RunStatusResponse] = []
-    try:
-        while max_runs is None or len(executed) < max_runs:
-            run = worker.execute_next_queued()
-            if run is None:
-                if max_runs is not None:
-                    break
-                time.sleep(poll_interval)
-                continue
-            executed.append(run)
-    except KeyboardInterrupt:
-        pass
-    return executed
+    with runner_controller(get_settings()) as controller:
+        def execute_next():
+            if controller is not None and not controller.tick(worker.run_store.has_unfinished_runs()):
+                return None
+            return worker.execute_next_queued()
+
+        return _poll_worker(
+            execute_next=execute_next,
+            recover=getattr(worker, "recover_stale_runs", lambda: None),
+            poll_interval=poll_interval,
+            max_runs=max_runs,
+        )
 
 
 def _eval_worker_run_once(service: EvaluationService | None = None):
@@ -477,10 +479,49 @@ def _eval_worker_loop(
         raise SystemExit("--max-runs must be at least 1.")
 
     worker = service or _persistent_eval_service()
+    return _poll_worker(
+        execute_next=worker.execute_next_queued,
+        recover=getattr(worker, "recover_interrupted_runs", lambda: None),
+        poll_interval=poll_interval,
+        max_runs=max_runs,
+    )
+
+
+def _poll_worker(*, execute_next: Callable, recover: Callable, poll_interval: float, max_runs: int | None) -> list:
     executed = []
+    retry_delay = 1.0
+    needs_recovery = True
+    last_recovery = 0.0
     try:
         while max_runs is None or len(executed) < max_runs:
-            run = worker.execute_next_queued()
+            try:
+                if needs_recovery or time.monotonic() - last_recovery >= 60:
+                    recover()
+                    needs_recovery = False
+                    last_recovery = time.monotonic()
+                run = execute_next()
+            except RunnerUnavailable as exc:
+                logging.getLogger("repopilot.worker").warning("%s", exc)
+                time.sleep(30)
+                continue
+            except DBAPIError as exc:
+                sqlstate = getattr(exc.orig, "sqlstate", None)
+                disconnected = exc.connection_invalidated or (
+                    isinstance(exc, OperationalError) and (
+                        sqlstate is None or sqlstate.startswith("08") or sqlstate in {"57P01", "57P02", "57P03"}
+                    )
+                )
+                if not disconnected:
+                    raise
+                # Never log connection strings, credentials, or the failed SQL.
+                logging.getLogger("repopilot.worker").warning(
+                    "Database connection unavailable; retrying queue polling in %.0fs.", retry_delay
+                )
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30.0)
+                needs_recovery = True
+                continue
+            retry_delay = 1.0
             if run is None:
                 if max_runs is not None:
                     break

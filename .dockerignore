@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+**/.env
+**/.env.*
+.repopilot
+.pytest_tmp
+.agents
+.codex
+**/__pycache__
+**/node_modules
+**/.next
+**/*.tsbuildinfo
+**/*.pem
+**/*.key
+**/dist
+**/build
