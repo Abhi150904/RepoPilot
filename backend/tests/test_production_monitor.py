@@ -138,11 +138,13 @@ def test_embedded_queue_probe_is_read_only_and_aggregate(monkeypatch, capsys, ag
             statements.append(str(statement.compile(dialect=postgresql.dialect())))
             return next(values)
 
-    engine = SimpleNamespace(connect=lambda: Connection(), dispose=lambda: None)
+        def execute(self, statement):
+            assert str(statement) == "SET LOCAL statement_timeout = '10s'"
+
+    engine = SimpleNamespace(begin=lambda: Connection(), dispose=lambda: None)
     def create_engine(url, connect_args):
         assert url == "postgresql+psycopg://unused"
-        assert connect_args["connect_timeout"] == 5
-        assert "statement_timeout=10000" in connect_args["options"]
+        assert connect_args == {"connect_timeout": 5}
         return engine
 
     monkeypatch.setattr(sqlalchemy, "create_engine", create_engine)

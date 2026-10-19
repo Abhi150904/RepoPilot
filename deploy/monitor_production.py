@@ -23,16 +23,15 @@ QUEUE_MAX_SECONDS = 1200
 QUEUE_PROBE = """
 import json
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import create_engine, select, func, or_
+from sqlalchemy import create_engine, select, func, or_, text
 from app.api.runs import RunRow
 from app.core.config import get_settings
 
 now = datetime.now(timezone.utc)
-engine = create_engine(get_settings().database_url, connect_args={
-    "connect_timeout": 5, "options": "-c statement_timeout=10000"
-})
+engine = create_engine(get_settings().database_url, connect_args={"connect_timeout": 5})
 try:
-    with engine.connect() as connection:
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL statement_timeout = '10s'"))
         oldest = connection.scalar(select(func.min(RunRow.created_at)).where(
             RunRow.lifecycle_status == "queued"))
         stale = connection.scalar(select(func.count()).select_from(RunRow).where(
