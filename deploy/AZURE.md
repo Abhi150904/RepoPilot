@@ -137,6 +137,8 @@ After app/worker restart the idle grace starts again; stale running leases are
 recovered by existing logic, not automatically replayed. No controller can stop
 compute if it is down or Azure rejects deallocation. This is NOT a billing cap:
 set monitoring for worker failure/old queue, runner left on, disk growth and costs.
+See [MONITORING.md](MONITORING.md) for the app-host health heartbeat, installation,
+email-delivery acceptance test, and limits (including no runner-cost alert).
 Keep spending-limit protection and an operator-access route for manual deallocation.
 
 ## Live acceptance gate
