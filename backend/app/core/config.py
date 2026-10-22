@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -81,6 +82,12 @@ class Settings(BaseSettings):
     llm_budget_path: str = ".repopilot/openai-budget.sqlite"
     user_max_active_runs: int = Field(default=1, ge=1)
     user_max_daily_runs: int = Field(default=5, ge=1)
+    billing_enabled: bool = False
+    polar_server: Literal["sandbox"] = "sandbox"
+    polar_access_token: str | None = Field(default=None, repr=False)
+    polar_webhook_secret: str | None = Field(default=None, repr=False)
+    polar_product_id: str | None = None
+    polar_organization_id: str | None = None
     staging_github_user_ids: str = ""
     sandbox_image: str = "python:3.11-slim"
     sandbox_docker_host: str | None = None

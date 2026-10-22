@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.api.runs import Base
 import app.core.audit  # noqa: F401
+import app.services.billing  # noqa: F401
 from app.core.config import get_settings
 
 

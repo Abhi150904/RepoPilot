@@ -7,6 +7,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import {
   Command,
+  CreditCard,
   Github,
   GitBranch,
   Home,
@@ -25,6 +26,7 @@ const navItems = [
   { href: "/app", label: "Command Center", icon: Home },
   { href: "/runs", label: "Runs", icon: ListChecks },
   { href: "/repositories", label: "Repositories", icon: GitBranch },
+  { href: "/billing", label: "Billing Demo", icon: CreditCard },
   { href: "/settings", label: "Settings", icon: Settings }
 ];
 
@@ -35,7 +37,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [hostedMode, setHostedMode] = useState(false);
 
   useEffect(() => {
-    setCollapsed(window.localStorage.getItem("repopilot.sidebar") === "collapsed");
+    setCollapsed(window.innerWidth < 768 || window.localStorage.getItem("repopilot.sidebar") === "collapsed");
   }, []);
 
   useEffect(() => {
