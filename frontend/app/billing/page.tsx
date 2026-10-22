@@ -32,7 +32,7 @@ export default function BillingPage() {
   useEffect(() => {
     const returned = new URLSearchParams(window.location.search).get("checkout");
     if (returned === "returned") setNotice("Returned from checkout. Your balance updates after payment confirmation.");
-    if (returned === "cancelled") setNotice("You left checkout. No demo attempts have been added unless payment was confirmed.");
+    if (returned === "cancelled") setNotice("Checkout closed. Credits are added only after payment confirmation.");
     void refresh();
     if (returned !== "returned") return;
     let count = 0;

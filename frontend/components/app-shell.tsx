@@ -26,7 +26,7 @@ const navItems = [
   { href: "/app", label: "Command Center", icon: Home },
   { href: "/runs", label: "Runs", icon: ListChecks },
   { href: "/repositories", label: "Repositories", icon: GitBranch },
-  { href: "/billing", label: "Billing Demo", icon: CreditCard },
+  { href: "/billing", label: "Billing", icon: CreditCard },
   { href: "/settings", label: "Settings", icon: Settings }
 ];
 
