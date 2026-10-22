@@ -142,6 +142,37 @@ export async function getGitHubRepositories(): Promise<GitHubRepositoriesRespons
   return apiFetch<GitHubRepositoriesResponse>("/github/repositories");
 }
 
+export type BillingStatus = {
+  enabled: boolean;
+  environment: "sandbox";
+  demo_balance: number;
+  pack_attempts: number;
+  test_price_cents: number;
+  currency: string;
+  purchases: { id: string; state: string; created_at: string }[];
+  activity: { id: string; kind: string; delta: number; created_at: string }[];
+};
+
+export type BillingSimulation = {
+  simulated: true;
+  summary: string;
+  patch: string;
+  checks: string[];
+  demo_balance: number;
+};
+
+export async function getBilling(signal?: AbortSignal): Promise<BillingStatus> {
+  return apiFetch<BillingStatus>("/billing", { signal, cache: "no-store" });
+}
+
+export async function startSandboxCheckout(requestKey: string): Promise<{ id: string; url: string }> {
+  return apiFetch("/billing/checkout", { method: "POST", body: JSON.stringify({ request_key: requestKey }) });
+}
+
+export async function simulateBillingRun(requestKey: string): Promise<BillingSimulation> {
+  return apiFetch("/billing/simulate", { method: "POST", body: JSON.stringify({ request_key: requestKey }) });
+}
+
 export async function getRun(runId: string, signal?: AbortSignal): Promise<RunStatusResponse> {
   return apiFetch<RunStatusResponse>(`/runs/${runId}`, { signal, cache: "no-store" });
 }

@@ -37,6 +37,13 @@ from app.core.audit import AuditLogger
 from app.core.llm_usage import LLMUsageRecorder
 from app.api.runs import RunLimits, RunStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
+from app.services.billing import BillingError, SandboxBilling
+from pydantic import BaseModel
+from uuid import UUID
+
+
+class BillingAction(BaseModel):
+    request_key: UUID
 
 
 def create_app(
@@ -45,6 +52,7 @@ def create_app(
     session_store: InMemorySessionStore | None = None,
     oauth_client: GitHubOAuthClient | None = None,
     github_app_service: GitHubAppService | None = None,
+    billing_service: SandboxBilling | None = None,
 ) -> FastAPI:
     config = settings or get_settings()
     if config.deployment_environment in {"staging", "production"} and deployment_issues(config):
@@ -72,6 +80,7 @@ def create_app(
         )
     )
     repository_authorizer = RepositoryAuthorizationService(github_app)
+    billing = billing_service or SandboxBilling(config)
     api_logger = logging.getLogger("repopilot.api")
 
     @api.middleware("http")
@@ -275,6 +284,40 @@ def create_app(
             ],
             install_url=github_app.installation_url(),
         )
+
+    @api.exception_handler(BillingError)
+    async def billing_error_handler(request: Request, error: BillingError):
+        return JSONResponse(status_code=error.status, content={
+            "error": {"code": error.code, "message": str(error)},
+            "request_id": _request_id(request),
+        })
+
+    def billing_user(request: Request, *, csrf: bool = False):
+        session = _require_session(request, sessions, config, csrf=csrf)
+        if session is None:
+            raise HTTPException(status_code=401, detail={"code": "authentication_required", "message": "Sign in to use sandbox billing."})
+        return session.user.github_user_id
+
+    @api.get("/billing")
+    def billing_status(request: Request):
+        return billing.status(billing_user(request))
+
+    @api.post("/billing/checkout")
+    def billing_checkout(action: BillingAction, request: Request):
+        return billing.checkout(billing_user(request, csrf=True), str(action.request_key))
+
+    @api.post("/billing/simulate")
+    def billing_simulate(action: BillingAction, request: Request):
+        return billing.simulate(billing_user(request, csrf=True), str(action.request_key))
+
+    @api.post("/billing/webhook")
+    async def billing_webhook(request: Request):
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 262144:
+                raise HTTPException(status_code=413, detail={"code": "payload_too_large", "message": "Webhook payload too large."})
+        return billing.webhook(bytes(body), dict(request.headers))
 
     @api.post(
         "/runs",
