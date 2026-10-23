@@ -313,16 +313,8 @@ def create_app(
         user_id = session.user.github_user_id if session else None
         return {"enforced": config.hosted_mode,
                 "introductory": run_service.run_store.introductory_usage(user_id) if user_id else None,
-                "simulation_credits": billing.balance(user_id) if user_id else 0,
+                "run_credits": billing.balance(user_id) if user_id else 0,
                 "billing_enabled": billing_configured(config) if user_id else False}
-
-    @api.get("/simulations")
-    def list_simulations(request: Request):
-        return billing.simulations(billing_user(request))
-
-    @api.post("/simulations")
-    def start_simulation(action: BillingAction, request: Request):
-        return billing.simulate(billing_user(request, csrf=True), str(action.request_key))
 
     @api.post("/billing/webhook")
     async def billing_webhook(request: Request):
@@ -360,6 +352,7 @@ def create_app(
                 max_active=config.user_max_active_runs,
                 max_daily=config.user_max_daily_runs,
                 max_lifetime=FREE_REAL_RUNS,
+                allow_paid=billing_configured(config),
             ) if config.hosted_mode else None,
         )
         if inline_run_execution_enabled(config) and run_service.consume_execution_pending(run.run_id):

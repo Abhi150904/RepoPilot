@@ -44,10 +44,11 @@ class RunLimits:
     max_active: int
     max_daily: int
     max_lifetime: int | None = None
+    allow_paid: bool = False
 
     def check(self, *, active: int, recent: int, lifetime: int = 0) -> None:
-        if self.max_lifetime is not None and lifetime >= self.max_lifetime:
-            raise FreeRunsExhausted("Your two introductory AI runs are used or reserved. Sandbox credits can only fund simulations.")
+        if self.max_lifetime is not None and lifetime >= self.max_lifetime and not self.allow_paid:
+            raise FreeRunsExhausted("Your free runs are used or reserved. Buy credits in Billing to start another run.")
         if active >= self.max_active:
             raise RunLimitExceeded(f"You already have {self.max_active} queued or running run(s). Wait for a run to finish before starting another.")
         if recent >= self.max_daily:
@@ -221,6 +222,7 @@ class RunStore:
         owner_key = _idempotency_owner_key(owner)
         if limits is not None and owner is None:
             raise ValueError("Per-user run limits require an authenticated owner.")
+        intro_state = None
         if self._session_factory:
             with self._session_factory() as session:
                 if limits is not None:
@@ -239,6 +241,8 @@ class RunStore:
                     recent = session.scalar(user_runs.where(RunRow.created_at >= now - timedelta(hours=24))) or 0
                     lifetime = session.scalar(user_runs.where(RunRow.intro_state.in_(["reserved", "consumed"]))) or 0
                     limits.check(active=active, recent=recent, lifetime=lifetime)
+                    if limits.max_lifetime is not None:
+                        intro_state = "reserved" if lifetime < limits.max_lifetime else "credit_reserved"
                 record = RunRecord(
                     run_id=uuid4().hex,
                     lifecycle_status="queued",
@@ -251,8 +255,11 @@ class RunStore:
                     idempotency_key=idempotency_key,
                     idempotency_owner_key=owner_key if idempotency_key else None,
                     payload_hash=payload_hash if idempotency_key else None,
-                    intro_state="reserved" if limits and limits.max_lifetime is not None else None,
+                    intro_state=intro_state,
                 )
+                if intro_state == "credit_reserved":
+                    from app.services.billing import reserve_run_credit
+                    reserve_run_credit(session, owner.github_user_id, record.run_id)
                 _upsert_owner_metadata(session, owner, now)
                 session.add(_row_from_record(record))
                 _add_event(session, record.run_id, "run.created", now, {"request_id": request_id})
@@ -302,6 +309,9 @@ class RunStore:
                     recent=sum(record.created_at >= now - timedelta(hours=24) for record in user_runs),
                     lifetime=sum(record.intro_state in {"reserved", "consumed"} for record in user_runs),
                 )
+                if (limits.max_lifetime is not None and sum(
+                        row.intro_state in {"reserved", "consumed"} for row in user_runs) >= limits.max_lifetime):
+                    raise FreeRunsExhausted("Run credits require durable storage. Buy credits in Billing after setup is complete.")
             record.events.append(_event(record.run_id, "run.created", now, {"request_id": request_id}))
             record.events.append(_event(record.run_id, "run.queued", now, {}))
             self._runs[record.run_id] = record
@@ -318,6 +328,12 @@ class RunStore:
             session.execute(text("BEGIN IMMEDIATE"))
         else:
             raise ValueError("Per-user run limits require PostgreSQL or SQLite.")
+
+    @staticmethod
+    def _lock_sqlite_transition(session: Session) -> None:
+        # SQLite ignores FOR UPDATE: lock before reading reservation/lease state.
+        if session.get_bind().dialect.name == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
 
     def get(self, run_id: str) -> RunStatusResponse | None:
         if self._session_factory:
@@ -352,6 +368,7 @@ class RunStore:
         now = _now()
         if self._session_factory:
             with self._session_factory.begin() as session:
+                self._lock_sqlite_transition(session)
                 row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
                 if row is None or row.lifecycle_status != "running" or row.worker_id != worker_id:
                     return False
@@ -360,6 +377,10 @@ class RunStore:
                     return False
                 if row.intro_state == "reserved":
                     row.intro_state = "consumed"
+                elif row.intro_state == "credit_reserved":
+                    from app.services.billing import confirm_run_credit
+                    confirm_run_credit(session, row.owner_github_user_id)
+                    row.intro_state = "credit_consumed"
                 _add_event(session, run_id, "run.execution_started", now, {})
             return True
         with self._lock:
@@ -492,6 +513,7 @@ class RunStore:
         cutoff = stale_before or now
         if self._session_factory:
             with self._session_factory() as session:
+                self._lock_sqlite_transition(session)
                 rows = list(
                     session.scalars(
                         select(RunRow).where(
@@ -505,6 +527,10 @@ class RunStore:
                     row.lifecycle_status = "interrupted"
                     if row.intro_state == "reserved":
                         row.intro_state = "released"
+                    elif row.intro_state == "credit_reserved":
+                        from app.services.billing import release_run_credit
+                        release_run_credit(session, row.owner_github_user_id, row.run_id)
+                        row.intro_state = "credit_released"
                     row.updated_at = now
                     row.worker_id = None
                     row.lease_expires_at = None
@@ -542,6 +568,7 @@ class RunStore:
         now = _now()
         if self._session_factory:
             with self._session_factory() as session:
+                self._lock_sqlite_transition(session)
                 statement = (
                     select(RunRow)
                     .where(RunRow.lifecycle_status == "queued")
@@ -657,6 +684,7 @@ class RunStore:
         now = _now()
         if self._session_factory:
             with self._session_factory() as session:
+                self._lock_sqlite_transition(session)
                 row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
                 if row is None:
                     raise KeyError(run_id)
@@ -670,6 +698,15 @@ class RunStore:
                 if lifecycle_status in ("completed", "failed", "interrupted"):
                     if row.intro_state == "reserved":
                         row.intro_state = "consumed" if lifecycle_status == "completed" else "released"
+                    elif row.intro_state == "credit_reserved":
+                        if lifecycle_status == "completed":
+                            from app.services.billing import confirm_run_credit
+                            confirm_run_credit(session, row.owner_github_user_id)
+                            row.intro_state = "credit_consumed"
+                        else:
+                            from app.services.billing import release_run_credit
+                            release_run_credit(session, row.owner_github_user_id, row.run_id)
+                            row.intro_state = "credit_released"
                     row.worker_id = None
                     row.lease_expires_at = None
                     row.last_heartbeat_at = None

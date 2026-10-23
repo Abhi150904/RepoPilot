@@ -43,26 +43,26 @@ No blind handoff. No automatic merge. An engineering workflow you can inspect fr
 
 | Workspace | Purpose |
 | --- | --- |
-| **Command Center** | Start an AI run or an explicitly labeled simulation; see introductory usage and simulation credits separately. |
+| **Command Center** | Start a real AI run; see your free allowance and purchased run credits. |
 | **Runs** | Follow execution, inspect artifacts and failures, and review changes before publication. |
 | **Repositories** | Browse repositories available through your GitHub installation. |
-| **Billing** | Purchase sandbox simulation credits and inspect your balance, purchases, and activity. |
+| **Billing** | Buy run credits and inspect your balance, purchases, and activity. |
 | **Settings** | Inspect account and application configuration. |
 
 ### Try the Workflow on Your Terms
 
 Hosted accounts receive **two lifetime introductory AI runs per GitHub account**, subject to capacity and spending limits. These run the actual engineering workflow. Existing owned runs count toward the allowance; it does not reset after a deployment.
 
-Want to explore the interaction without starting an AI job? **Simulation mode** produces a fixed example with saved results. A **$5 sandbox checkout grants five simulation credits**. Each new simulation uses one credit; reopening a saved result uses none.
+After the two introductory runs, continue with run credits. A **$5 sandbox checkout grants five credits**. Each additional real AI run uses one credit. Free attempts are always used before purchased credits; reviewing or reopening a run never costs another credit.
 
-**Payments are test-only. No real money is collected. Simulation credits do not buy real AI runs**, modify repositories, execute tests, or create pull requests. Billing displays financial activity; execution belongs in the Command Center.
+**Payments are test-only; no real money is collected. The AI runs are real** and use the application's configured model provider and execution environment. All concurrency, daily admission, and AI spending limits remain in effect. Billing displays financial activity; execution belongs in the Command Center.
 
 > RepoPilot is an early-access engineering application. The workflow has been exercised on controlled repositories, not certified for arbitrary projects or unrestricted multi-tenant execution. This README describes the current source; the hosted deployment may lag unreleased changes.
 
 ## Built Around Trust Boundaries
 
 - **Human approval:** generated code does not become a published PR without approval.
-- **Account ownership:** hosted runs, purchases, balances, and simulation results belong to the signed-in GitHub account.
+- **Account ownership:** hosted runs, purchases, and balances belong to the signed-in GitHub account.
 - **Isolated execution:** repository tests run in restricted Docker containers, with a separate execution host required for production.
 - **Restricted containers:** non-root execution, disabled networking, a read-only root filesystem, and resource, output, and time limits constrain test execution. Workspace archives exclude sensitive files and Git configuration.
 - **Cost-aware AI:** per-run and shared-ledger spending guards reserve estimated costs before provider requests; account limits also restrict admission.
@@ -103,7 +103,7 @@ Browser / Next.js frontend (Vercel)
 | Hosted infrastructure | Vercel frontend, Azure app and runner VMs, Caddy HTTPS proxy |
 | Payments and monitoring | Polar sandbox; scheduled production checks and Healthchecks heartbeats |
 
-The app host keeps trusted services online while the isolated Azure runner can start on demand and deallocate when idle. Simulation requests never enter that execution queue or wake the runner.
+The app host keeps trusted services online while the isolated Azure runner can start on demand and deallocate when idle. Free and credit-funded runs use the same engineering workflow and approval gates.
 
 ## Run Locally
 
@@ -186,7 +186,9 @@ Hosted real runs have two lifetime introductory attempts per immutable GitHub us
 
 Repairs within a run, reviewing, rejecting, publishing, refreshing, and replaying the same accepted idempotent request do not take an extra attempt. Default additional limits are one queued/running job per user and five admissions in a rolling 24-hour window, configured with `REPOPILOT_USER_MAX_ACTIVE_RUNS` and `REPOPILOT_USER_MAX_DAILY_RUNS`. These hosted admission limits do not apply to the local CLI; model spending guards still do.
 
-Simulation credits cannot replenish or bypass the real AI allowance. `GET /usage` reports the signed-in account's introductory usage and simulation balance; `GET /simulations` and `POST /simulations` provide owned saved simulations. The retired `POST /billing/simulate` route is not available.
+After the introductory allowance is used or reserved, admission atomically reserves one purchased credit in the same database transaction that creates the queued run. Failed admission or an idempotent replay cannot debit twice. Setup failure or stale-worker recovery before execution releases the credit once; failures after execution starts still count. A refund that makes the balance negative prevents an unstarted credit-funded run from beginning. Runner boot failures leave its queued reservation in place.
+
+`GET /usage` reports the account's introductory usage and available `run_credits`. `GET /billing` reports `credit_balance` and financial history. There are no simulation endpoints or fixed example runs. Sandbox purchases unlock actual AI execution at the operator's expense; keep the persistent AI budget ledger and account limits enabled.
 
 </details>
 
@@ -196,7 +198,7 @@ Simulation credits cannot replenish or bypass the real AI allowance. `GET /usage
 Billing is disabled by default. The integration accepts **sandbox mode only**, with fixed sandbox API and checkout hosts. No live merchant onboarding is needed.
 
 1. Create an organization at [Polar sandbox](https://sandbox.polar.sh).
-2. Create a public one-time fixed-price product, `RepoPilot Demo Pack`, at USD 5.00. Do not add subscriptions, trials, discounts, or variable pricing.
+2. Create a public one-time fixed-price product, `RepoPilot Run Credits`, at USD 5.00. Do not add subscriptions, trials, discounts, or variable pricing. An existing product can be renamed without replacing its ID.
 3. Record the product and organization IDs. Create an organization token with `checkouts:write` only.
 4. Add an HTTPS webhook at your API origin's `/billing/webhook` path. The hosted endpoint is `https://repopilot.duckdns.org/billing/webhook`. Select **Raw / JSON**, API version **2026-04**, and events **`order.paid`** and **`order.refunded`**. This matches the backend's explicit checkout API version.
 5. Put the credentials directly into the app host's private environment:
@@ -213,7 +215,7 @@ REPOPILOT_PUBLIC_BASE_URL=https://repo-pilot-sigma.vercel.app
 
 Keep the signing secret exactly as provided; do not encode it yourself. Both current Standard Webhooks secrets and legacy Polar HMAC secrets require valid signatures and recent timestamps. Never put these secrets in browser code or `NEXT_PUBLIC_` variables. Billing also requires the database and complete checkout configuration.
 
-Only a verified `order.paid` event matching the expected checkout, customer, organization, product, currency, and amount grants five credits. A success redirect, unrelated event, canceled checkout, or provider error grants nothing. Order/action identifiers prevent duplicate grants and duplicate simulation spending.
+Only a verified `order.paid` event matching the expected checkout, customer, organization, product, currency, and amount grants five credits. A success redirect, unrelated event, canceled checkout, or provider error grants nothing. Order identifiers and run idempotency prevent duplicate grants and charges.
 
 Any positive refund, including a partial refund, revokes the full five-credit pack once. Previously spent credits can leave a negative balance, which blocks further spending. A refund received before payment confirmation prevents a late grant. Existing purchases and ledger balances survive migration.
 
@@ -258,16 +260,17 @@ Allow container health checks to run, then verify:
 sudo python3 deploy/monitor_production.py --check-only
 ```
 
-All checks must pass. Confirm Vercel Production is Ready for the matching merged commit. Migration `20261023_0008` adds allowance state and saved simulations; it backfills existing owned runs instead of granting a fresh allowance, while retaining purchases, balances, artifacts, and approvals. This application update needs no runner rebuild, new ports, or replacement Polar product.
+All checks must pass. Confirm Vercel Production is Ready for the matching merged commit. Migration `20261023_0008` supplies the allowance state; existing owned runs are backfilled instead of receiving a fresh allowance. This update reuses that state and the existing billing ledger, so installations already on `0008` need no new schema migration. Existing balances, purchases, artifacts, and approvals are preserved. Legacy simulation records remain archived in the database but are no longer exposed or executable. No runner rebuild, new ports, or replacement Polar product is needed. You can rename the existing Polar product to `RepoPilot Run Credits` without changing its ID or price.
 
 Verify the release end to end:
 
-- Billing has no execution button; Command Center separates AI usage from simulation credits.
+- Billing has no execution button; Command Center shows free runs and purchased run credits without a simulation mode.
 - Existing balances remain unchanged, and historical owned runs count toward introductory usage.
-- Starting one simulation spends exactly one credit and saves the result. Reloading or reopening spends nothing and creates no real job, PR, or runner startup.
+- Free runs leave the credit balance unchanged. After both are used, an accepted real run reserves exactly one credit. Replaying the same request, refreshing, or reopening spends nothing extra.
+- Before execution, setup failure releases the credit; after execution begins, failure still counts. Credits cannot bypass daily, concurrency, or model spending limits.
 - A completed sandbox purchase grants five credits only after the signed event. Event redelivery adds nothing; cancellation adds nothing.
-- A refund revokes the pack once, including on redelivery. Negative balances after prior spending block further simulations.
-- A second GitHub account cannot access the first account's runs, purchases, balance, or simulation results.
+- A refund revokes the pack once, including on redelivery. Negative balances block new credit-funded runs and unstarted paid reservations until resolved.
+- A second GitHub account cannot access the first account's runs, purchases, or balance.
 - Checkout session tokens are removed from the returned address, and production checks and the scheduled monitor remain healthy.
 
 Local database tests use SQLite. Also verify webhook redelivery, account isolation, and concurrent spending against a disposable PostgreSQL database before opening the integration to untrusted traffic. Passing local tests or merging code alone does not verify a hosted release.

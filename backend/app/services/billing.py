@@ -1,30 +1,22 @@
-"""Sandbox-only billing. Nothing in this module dispatches real workflows."""
+"""Sandbox checkout and the transactional ledger funding real workflow runs."""
 from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
-from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
 from sqlalchemy import BigInteger, DateTime, Integer, String, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
-from sqlalchemy.types import JSON
 from standardwebhooks.webhooks import EmptyWebhookSecretError, Webhook, WebhookVerificationError
 
-from app.api.runs import Base
+from app.api.runs import Base, FreeRunsExhausted
 from app.core.config import Settings
 
 
 PACK_SIZE = 5
 PACK_CENTS = 500
-SIMULATION = {
-    "simulated": True,
-    "summary": "Simulated fix: reject an empty email before saving a user.",
-    "patch": '+ if not email or "@" not in email:\n+     raise ValueError("Invalid email")',
-    "checks": ["Analyze issue", "Prepare example patch", "Simulate test result"],
-}
 
 
 class BillingError(Exception):
@@ -68,16 +60,6 @@ class BillingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class SimulationRun(Base):
-    __tablename__ = "simulation_runs"
-    __table_args__ = (UniqueConstraint("user_id", "request_key"),)
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    request_key: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-
-
 def billing_configured(config: Settings) -> bool:
     return bool(config.billing_enabled and config.database_url and config.public_base_url
                 and config.polar_access_token and config.polar_webhook_secret
@@ -104,13 +86,7 @@ class SandboxBilling:
             raise BillingError("billing_unavailable", "Sandbox billing is not configured yet.", 503)
 
     def _lock(self, session, user_id: int):
-        # The account row serializes purchases, refunds and spending across API processes.
-        if session.bind.dialect.name == "postgresql":
-            from sqlalchemy.dialects.postgresql import insert
-        else:
-            from sqlalchemy.dialects.sqlite import insert
-        session.execute(insert(BillingAccount).values(user_id=user_id).on_conflict_do_nothing())
-        session.scalar(select(BillingAccount).where(BillingAccount.user_id == user_id).with_for_update())
+        _lock_account(session, user_id)
 
     @staticmethod
     def _balance(session, user_id):
@@ -119,7 +95,7 @@ class SandboxBilling:
 
     def status(self, user_id: int):
         if not billing_configured(self.config):
-            return {"enabled": False, "environment": "sandbox", "demo_balance": 0,
+            return {"enabled": False, "environment": "sandbox", "credit_balance": 0,
                     "pack_attempts": PACK_SIZE, "test_price_cents": PACK_CENTS,
                     "currency": "usd", "purchases": [], "activity": []}
         with self._factory()() as session:
@@ -127,7 +103,7 @@ class SandboxBilling:
                                         .order_by(BillingCheckout.created_at.desc()).limit(20)).all()
             activity = session.scalars(select(BillingEntry).where(BillingEntry.user_id == user_id)
                                        .order_by(BillingEntry.created_at.desc()).limit(20)).all()
-            return {"enabled": True, "environment": "sandbox", "demo_balance": self._balance(session, user_id),
+            return {"enabled": True, "environment": "sandbox", "credit_balance": self._balance(session, user_id),
                     "pack_attempts": PACK_SIZE, "test_price_cents": PACK_CENTS, "currency": "usd",
                     "purchases": [{"id": row.id, "state": row.state, "created_at": _iso_time(row.created_at)}
                                   for row in purchases],
@@ -257,38 +233,35 @@ class SandboxBilling:
         session.add(BillingEntry(id=uuid4().hex, user_id=user_id, source=source, kind=kind,
                                 delta=delta, created_at=_now()))
 
-    def simulate(self, user_id: int, request_key: str):
-        with self._factory().begin() as session:
-            self._lock(session, user_id)
-            run = session.scalar(select(SimulationRun).where(
-                SimulationRun.user_id == user_id, SimulationRun.request_key == request_key))
-            if run is not None:
-                return self._simulation_response(run, self._balance(session, user_id))
-            source = f"demo:{user_id}:{request_key}"
-            existing = session.scalar(select(BillingEntry).where(BillingEntry.source == source))
-            if not existing:
-                if self._balance(session, user_id) < 1:
-                    raise BillingError("demo_balance_empty", "No simulation credits remaining.", 409)
-                self._entry(session, user_id, source, "simulation", -1)
-            run = SimulationRun(id=uuid4().hex, user_id=user_id, request_key=request_key,
-                                created_at=_now(), result=dict(SIMULATION))
-            session.add(run)
-            session.flush()
-            return self._simulation_response(run, self._balance(session, user_id))
 
-    @staticmethod
-    def _simulation_response(run: SimulationRun, balance: int):
-        return {**run.result, "simulation_id": run.id, "created_at": _iso_time(run.created_at),
-                "demo_balance": balance}
+def _lock_account(session, user_id: int):
+    # Use the same row lock for webhook grants/refunds and run reservations.
+    if session.bind.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert
+    session.execute(insert(BillingAccount).values(user_id=user_id).on_conflict_do_nothing())
+    session.scalar(select(BillingAccount).where(BillingAccount.user_id == user_id).with_for_update())
 
-    def simulations(self, user_id: int):
-        if not billing_configured(self.config):
-            return []
-        with self._factory()() as session:
-            rows = session.scalars(select(SimulationRun).where(SimulationRun.user_id == user_id)
-                                   .order_by(SimulationRun.created_at.desc()).limit(20)).all()
-            balance = self._balance(session, user_id)
-            return [self._simulation_response(row, balance) for row in rows]
+
+def reserve_run_credit(session, user_id: int, run_id: str) -> None:
+    """Debit in the run-admission transaction, never in a separate commit."""
+    _lock_account(session, user_id)
+    if SandboxBilling._balance(session, user_id) < 1:
+        raise FreeRunsExhausted("Your free runs are used or reserved. Buy credits in Billing to start another run.")
+    SandboxBilling._entry(session, user_id, f"run:{run_id}:charge", "run", -1)
+
+
+def confirm_run_credit(session, user_id: int) -> None:
+    _lock_account(session, user_id)
+    # A refund can revoke the pack while a paid run is still queued.
+    if SandboxBilling._balance(session, user_id) < 0:
+        raise FreeRunsExhausted("Run credits were refunded before execution. Buy credits in Billing to continue.")
+
+
+def release_run_credit(session, user_id: int, run_id: str) -> None:
+    _lock_account(session, user_id)
+    SandboxBilling._entry(session, user_id, f"run:{run_id}:release", "run_release", 1)
 
 
 def _now():

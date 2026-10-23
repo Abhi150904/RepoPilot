@@ -76,6 +76,56 @@ def test_worker_recovery_preserves_or_releases_allowance(store, started):
     assert not store.begin_execution(run.run_id, worker_id="worker")
 
 
+def test_sqlite_recovery_cannot_refund_paid_run_during_execution_start(tmp_path, monkeypatch):
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from app.api.runs import RunEventRow, RunRow
+    import app.services.billing as billing
+
+    url = f"sqlite:///{tmp_path / 'paid-recovery.db'}"
+    execution_store = RunStore(database_url=url)
+    recovery_store = RunStore(engine=create_engine(url, connect_args={"timeout": 0}))
+    try:
+        for _ in range(2):
+            free_run = create(execution_store)
+            execute(execution_store, free_run)
+            execution_store.mark_failed(free_run.run_id, RuntimeError("Failed after starting"))
+        with execution_store._session_factory.begin() as session:
+            billing.SandboxBilling._entry(session, OWNER.github_user_id, "purchase:recovery-test", "purchase", 5)
+        paid_limits = RunLimits(max_active=10, max_daily=100, max_lifetime=2, allow_paid=True)
+        run = execution_store.create_result({"issue": "Paid run"}, owner=OWNER, limits=paid_limits).run
+        execution_store.mark_running(run.run_id, worker_id="worker", lease_seconds=-1)
+        confirm_credit = billing.confirm_run_credit
+        recovery_attempts = []
+
+        def confirm_while_recovery_attempts(session, user_id):
+            # A second connection must not release the reservation already read here.
+            with pytest.raises(OperationalError, match="database is locked"):
+                recovery_store.recover_stale_running_runs()
+            recovery_attempts.append(True)
+            confirm_credit(session, user_id)
+
+        monkeypatch.setattr(billing, "confirm_run_credit", confirm_while_recovery_attempts)
+        assert execution_store.begin_execution(run.run_id, worker_id="worker")
+        assert recovery_attempts == [True]
+        assert recovery_store.recover_stale_running_runs() == 1
+        assert not execution_store.begin_execution(run.run_id, worker_id="worker")
+        with execution_store._session_factory() as session:
+            row = session.get(RunRow, run.run_id)
+            assert row.lifecycle_status == "interrupted"
+            assert row.intro_state == "credit_consumed"
+            entries = session.execute(select(billing.BillingEntry.kind, billing.BillingEntry.delta)
+                .where(billing.BillingEntry.user_id == OWNER.github_user_id)).all()
+            assert sorted(entries) == [("purchase", 5), ("run", -1)]
+            events = session.scalars(select(RunEventRow.event_type)
+                .where(RunEventRow.run_id == run.run_id)).all()
+            assert events.count("run.execution_started") == 1
+    finally:
+        recovery_store.close()
+        execution_store.close()
+
+
 def test_concurrent_requests_cannot_reserve_more_than_two(store):
     def request(_):
         try:

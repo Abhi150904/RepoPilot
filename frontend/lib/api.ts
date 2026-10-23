@@ -146,22 +146,12 @@ export async function getGitHubRepositories(): Promise<GitHubRepositoriesRespons
 export type BillingStatus = {
   enabled: boolean;
   environment: "sandbox";
-  demo_balance: number;
+  credit_balance: number;
   pack_attempts: number;
   test_price_cents: number;
   currency: string;
   purchases: { id: string; state: string; created_at: string }[];
   activity: { id: string; kind: string; delta: number; created_at: string }[];
-};
-
-export type BillingSimulation = {
-  simulation_id: string;
-  created_at: string;
-  simulated: true;
-  summary: string;
-  patch: string;
-  checks: string[];
-  demo_balance: number;
 };
 
 export async function getBilling(signal?: AbortSignal): Promise<BillingStatus> {
@@ -175,20 +165,12 @@ export async function startSandboxCheckout(requestKey: string): Promise<{ id: st
 export type RunUsage = {
   enforced: boolean;
   introductory: { total: number; used: number; reserved: number; remaining: number } | null;
-  simulation_credits: number;
+  run_credits: number;
   billing_enabled: boolean;
 };
 
 export async function getRunUsage(signal?: AbortSignal): Promise<RunUsage> {
   return apiFetch("/usage", { signal, cache: "no-store" });
-}
-
-export async function createSimulation(requestKey: string): Promise<BillingSimulation> {
-  return apiFetch("/simulations", { method: "POST", body: JSON.stringify({ request_key: requestKey }) });
-}
-
-export async function listSimulations(): Promise<BillingSimulation[]> {
-  return apiFetch("/simulations", { cache: "no-store" });
 }
 
 export async function getRun(runId: string, signal?: AbortSignal): Promise<RunStatusResponse> {
