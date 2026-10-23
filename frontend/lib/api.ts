@@ -119,9 +119,10 @@ export async function logout(): Promise<AuthMeResponse> {
   return response;
 }
 
-export async function createRun(request: RunRequest): Promise<RunStatusResponse> {
+export async function createRun(request: RunRequest, requestKey?: string): Promise<RunStatusResponse> {
   return apiFetch<RunStatusResponse>("/runs", {
     method: "POST",
+    ...(requestKey ? { headers: { "Idempotency-Key": requestKey } } : {}),
     body: JSON.stringify(request)
   });
 }
@@ -154,6 +155,8 @@ export type BillingStatus = {
 };
 
 export type BillingSimulation = {
+  simulation_id: string;
+  created_at: string;
   simulated: true;
   summary: string;
   patch: string;
@@ -169,8 +172,23 @@ export async function startSandboxCheckout(requestKey: string): Promise<{ id: st
   return apiFetch("/billing/checkout", { method: "POST", body: JSON.stringify({ request_key: requestKey }) });
 }
 
-export async function simulateBillingRun(requestKey: string): Promise<BillingSimulation> {
-  return apiFetch("/billing/simulate", { method: "POST", body: JSON.stringify({ request_key: requestKey }) });
+export type RunUsage = {
+  enforced: boolean;
+  introductory: { total: number; used: number; reserved: number; remaining: number } | null;
+  simulation_credits: number;
+  billing_enabled: boolean;
+};
+
+export async function getRunUsage(signal?: AbortSignal): Promise<RunUsage> {
+  return apiFetch("/usage", { signal, cache: "no-store" });
+}
+
+export async function createSimulation(requestKey: string): Promise<BillingSimulation> {
+  return apiFetch("/simulations", { method: "POST", body: JSON.stringify({ request_key: requestKey }) });
+}
+
+export async function listSimulations(): Promise<BillingSimulation[]> {
+  return apiFetch("/simulations", { cache: "no-store" });
 }
 
 export async function getRun(runId: string, signal?: AbortSignal): Promise<RunStatusResponse> {

@@ -10,6 +10,7 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import BigInteger, DateTime, Integer, String, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
+from sqlalchemy.types import JSON
 from standardwebhooks.webhooks import EmptyWebhookSecretError, Webhook, WebhookVerificationError
 
 from app.api.runs import Base
@@ -67,6 +68,16 @@ class BillingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class SimulationRun(Base):
+    __tablename__ = "simulation_runs"
+    __table_args__ = (UniqueConstraint("user_id", "request_key"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    request_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
 def billing_configured(config: Settings) -> bool:
     return bool(config.billing_enabled and config.database_url and config.public_base_url
                 and config.polar_access_token and config.polar_webhook_secret
@@ -118,10 +129,16 @@ class SandboxBilling:
                                        .order_by(BillingEntry.created_at.desc()).limit(20)).all()
             return {"enabled": True, "environment": "sandbox", "demo_balance": self._balance(session, user_id),
                     "pack_attempts": PACK_SIZE, "test_price_cents": PACK_CENTS, "currency": "usd",
-                    "purchases": [{"id": row.id, "state": row.state, "created_at": row.created_at.isoformat()}
+                    "purchases": [{"id": row.id, "state": row.state, "created_at": _iso_time(row.created_at)}
                                   for row in purchases],
                     "activity": [{"id": row.id, "kind": row.kind, "delta": row.delta,
-                                  "created_at": row.created_at.isoformat()} for row in activity]}
+                                  "created_at": _iso_time(row.created_at)} for row in activity]}
+
+    def balance(self, user_id: int) -> int:
+        if not billing_configured(self.config):
+            return 0
+        with self._factory()() as session:
+            return self._balance(session, user_id)
 
     def checkout(self, user_id: int, request_key: str):
         factory = self._factory()
@@ -243,18 +260,43 @@ class SandboxBilling:
     def simulate(self, user_id: int, request_key: str):
         with self._factory().begin() as session:
             self._lock(session, user_id)
+            run = session.scalar(select(SimulationRun).where(
+                SimulationRun.user_id == user_id, SimulationRun.request_key == request_key))
+            if run is not None:
+                return self._simulation_response(run, self._balance(session, user_id))
             source = f"demo:{user_id}:{request_key}"
             existing = session.scalar(select(BillingEntry).where(BillingEntry.source == source))
             if not existing:
                 if self._balance(session, user_id) < 1:
-                    raise BillingError("demo_balance_empty", "No demo attempts remaining.", 409)
+                    raise BillingError("demo_balance_empty", "No simulation credits remaining.", 409)
                 self._entry(session, user_id, source, "simulation", -1)
-                session.flush()
-            return {**SIMULATION, "demo_balance": self._balance(session, user_id)}
+            run = SimulationRun(id=uuid4().hex, user_id=user_id, request_key=request_key,
+                                created_at=_now(), result=dict(SIMULATION))
+            session.add(run)
+            session.flush()
+            return self._simulation_response(run, self._balance(session, user_id))
+
+    @staticmethod
+    def _simulation_response(run: SimulationRun, balance: int):
+        return {**run.result, "simulation_id": run.id, "created_at": _iso_time(run.created_at),
+                "demo_balance": balance}
+
+    def simulations(self, user_id: int):
+        if not billing_configured(self.config):
+            return []
+        with self._factory()() as session:
+            rows = session.scalars(select(SimulationRun).where(SimulationRun.user_id == user_id)
+                                   .order_by(SimulationRun.created_at.desc()).limit(20)).all()
+            balance = self._balance(session, user_id)
+            return [self._simulation_response(row, balance) for row in rows]
 
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _iso_time(value: datetime) -> str:
+    return value.replace(tzinfo=value.tzinfo or timezone.utc).isoformat()
 
 
 def _verify_event(secret: str, body: bytes, headers: dict[str, str]):

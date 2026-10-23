@@ -1,25 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ArrowRight, Check, Play } from "lucide-react";
+import { ArrowRight, Check } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { pollResource } from "@/lib/poll-resource";
-import { Button } from "@/components/button";
-import { createRun, listRuns, type RunRequest } from "@/lib/api";
-import { buildRunRequest } from "@/lib/run-request";
-import { summaryFromRun, summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
+import { RunLauncher } from "@/components/run-launcher";
+import { listRuns } from "@/lib/api";
+import { summariesFromRuns, type StoredRunSummary } from "@/lib/run-history";
 
 export default function CommandCenterPage() {
-  const router = useRouter();
   const [history, setHistory] = useState<StoredRunSummary[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-  const [isStarting, setIsStarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [repository, setRepository] = useState("");
-  const [issueNumber, setIssueNumber] = useState("");
 
   useEffect(() => {
     setIsLoadingHistory(true);
@@ -37,37 +30,6 @@ export default function CommandCenterPage() {
     });
   }, []);
 
-  async function startRun() {
-    const request = buildRunRequest({
-      mode: "github",
-      repository,
-      issueNumber,
-      issueText: "",
-      applyChanges: true,
-      runTests: true,
-      maxRepairAttempts: "2"
-    });
-    if ("error" in request) {
-      setError(request.error);
-      return;
-    }
-    await runRequest(request);
-  }
-
-  async function runRequest(request: RunRequest) {
-    setIsStarting(true);
-    setError(null);
-    try {
-      const run = await createRun(request);
-      setHistory((current) => [summaryFromRun(run), ...current.filter((item) => item.runId !== run.run_id)]);
-      router.push(`/runs/${run.run_id}`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not start run.");
-    } finally {
-      setIsStarting(false);
-    }
-  }
-
   const needsAttention = history.filter((run) => run.needsAttention);
 
   return (
@@ -81,15 +43,7 @@ export default function CommandCenterPage() {
               Start a scoped run, review completed work and keep autonomous engineering under human control.
             </p>
           </div>
-          <QuickRunCard
-            repository={repository}
-            issueNumber={issueNumber}
-            isStarting={isStarting}
-            error={error}
-            onRepository={setRepository}
-            onIssueNumber={setIssueNumber}
-            onStart={startRun}
-          />
+          <RunLauncher />
         </section>
         <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
           <AttentionPanel runs={needsAttention} isLoading={isLoadingHistory} />
@@ -98,48 +52,6 @@ export default function CommandCenterPage() {
         <RecentRuns runs={history} error={historyError} isLoading={isLoadingHistory} />
       </div>
     </AppShell>
-  );
-}
-
-function QuickRunCard({
-  repository,
-  issueNumber,
-  isStarting,
-  error,
-  onRepository,
-  onIssueNumber,
-  onStart
-}: {
-  repository: string;
-  issueNumber: string;
-  isStarting: boolean;
-  error: string | null;
-  onRepository: (value: string) => void;
-  onIssueNumber: (value: string) => void;
-  onStart: () => void;
-}) {
-  return (
-    <section className="rounded-xl border border-cyan-300/35 bg-cyan-400/[0.04] p-5 shadow-[0_0_34px_rgba(56,189,248,0.08)]">
-      <div className="flex items-center gap-2">
-        <Play size={18} className="text-cyan-300" />
-        <h2 className="font-display text-lg font-semibold">Quick Run</h2>
-      </div>
-      <p className="mt-2 text-sm text-[var(--text-secondary)]">Start a focused GitHub issue run and track it through review.</p>
-      <div className="mt-4 grid gap-3">
-        <label className="grid gap-2 text-sm">
-          <span className="text-[var(--text-secondary)]">Repository</span>
-          <input className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 outline-none focus:border-cyan-300" value={repository} onChange={(event) => onRepository(event.target.value)} placeholder="owner/repo" />
-        </label>
-        <label className="grid gap-2 text-sm">
-          <span className="text-[var(--text-secondary)]">Issue number</span>
-          <input className="min-h-10 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 outline-none focus:border-cyan-300" value={issueNumber} onChange={(event) => onIssueNumber(event.target.value)} type="number" min="1" />
-        </label>
-      </div>
-      <Button className="mt-4 w-full !bg-cyan-300/15 !text-white hover:!bg-cyan-300/25" variant="primary" disabled={isStarting} onClick={onStart}>
-        {isStarting ? "Starting..." : "Start RepoPilot"}
-      </Button>
-      {error ? <p className="mt-3 text-sm text-red-300">{error}</p> : null}
-    </section>
   );
 }
 

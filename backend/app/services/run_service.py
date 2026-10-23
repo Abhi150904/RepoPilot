@@ -12,7 +12,7 @@ from app.agents.approval import ApprovalGate
 from app.agents.publication import PublicationPreparer
 from app.agents.publisher import PublishExecutor
 from app.agents.run_summarizer import RunSummarizer
-from app.api.runs import IdempotencyConflict, RunLimitExceeded, RunLimits, RunStore
+from app.api.runs import FreeRunsExhausted, IdempotencyConflict, RunLimitExceeded, RunLimits, RunStore
 from app.api.schemas import (
     ApprovalRequest,
     MetricsResponse,
@@ -93,6 +93,8 @@ class RepoPilotRunService:
                 limits=limits,
             )
             run = created.run
+        except FreeRunsExhausted as exc:
+            raise RunServiceError(status_code=402, code="free_runs_exhausted", message=str(exc)) from exc
         except RunLimitExceeded as exc:
             raise RunServiceError(status_code=429, code="run_limit_reached", message=str(exc)) from exc
         except IdempotencyConflict as exc:
@@ -164,6 +166,11 @@ class RepoPilotRunService:
         )
         stop_heartbeat = self._start_lease_heartbeat(run_id)
         try:
+            workflow = build_workflow()
+            runtime_input = _workflow_runtime_input(
+                run.request, run_id=run_id, github_token=self._github_token_for_run(run_id))
+            if not self.run_store.begin_execution(run_id, worker_id=self._worker_id):
+                return
             with llm_call_context(
                 LLMCallContext(
                     run_id=run_id,
@@ -171,13 +178,7 @@ class RepoPilotRunService:
                     recorder=self._llm_usage_recorder,
                 )
             ):
-                result = build_workflow().invoke(
-                    _workflow_runtime_input(
-                        run.request,
-                        run_id=run_id,
-                        github_token=self._github_token_for_run(run_id),
-                    )
-                )
+                result = workflow.invoke(runtime_input)
             response = _run_response(result)
             self.run_store.mark_completed(run_id, response)
             self.audit_logger.record(

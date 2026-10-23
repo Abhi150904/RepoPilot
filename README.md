@@ -1,426 +1,311 @@
+<div align="center">
+
 # RepoPilot
 
-RepoPilot is an agentic software engineering system that will eventually take a GitHub issue, inspect the repository, plan and apply a fix, run tests in isolation, review the result, pause for human approval, and open a pull request.
+### Ship fixes, not tickets.
 
-This repository currently implements **Pre-Phase 5**: a small LangGraph workflow that can fetch a real GitHub issue, retrieve repository context, generate a structured implementation plan, load full target-file contents, produce validated structured code changes, optionally apply those changes to an explicit local workspace, optionally run tests in a Docker sandbox, analyze the test outcome, decide whether a repair pass is appropriate, perform a bounded repair retry, pass failure context into repair attempts, and produce a final run summary.
+Turn GitHub issues into repository-aware changes, tested code, and reviewable pull requests.
+Let the agent do the groundwork. Keep the final decision yours.
 
-## Version 0 Workflow
+**[Open RepoPilot](https://repo-pilot-sigma.vercel.app)** &nbsp; | &nbsp; **[See the Workflow](#the-workflow)** &nbsp; | &nbsp; **[Run Locally](#run-locally)**
 
-```text
-START -> issue_analyzer -> planner -> END
-```
+Autonomous engineering. Human-controlled shipping.
 
-## Version 1 Workflow
+</div>
 
-```text
-START -> fetch_github_issue -> issue_analyzer -> repo_explorer -> planner -> END
-```
+---
 
-## Version 2.1 Retrieval
+## Your Issue. A Clear Path to a Pull Request.
 
-```text
-GitHub repository files
-  -> candidate file ranking
-  -> code-aware-ish chunking
-  -> keyword chunk scoring
-  -> repository context for planning
-```
+An issue is the starting point, not the whole context. RepoPilot explores the repository, finds relevant code, builds an implementation plan, writes changes, and runs tests in an isolated environment. You get the diff, test evidence, and review before deciding whether to publish a pull request.
 
-## Version 2.2 Vector Retrieval
+No blind handoff. No automatic merge. An engineering workflow you can inspect from start to finish.
 
-```text
-code chunks
-  -> deterministic local embeddings
-  -> in-memory cosine search
-  -> vector-ranked chunks
-```
+| From the backlog to review | What you get |
+| --- | --- |
+| **Context before code** | Repository exploration and hybrid retrieval surface relevant files and code chunks. |
+| **A plan you can follow** | Structured issue analysis and implementation steps connect the problem to the proposed change. |
+| **Changes with evidence** | Generated diffs, isolated test output, and bounded repair attempts stay attached to the run. |
+| **You control publication** | Inspect, approve or reject, then publish a pull request. Approval is required before publication. |
+| **Progress that survives a refresh** | Durable jobs, run timelines, saved artifacts, and worker recovery keep execution separate from the browser. |
+| **Limits built in** | Account allowances, concurrency limits, and AI spending guards put boundaries around execution. |
 
-The vector retriever is intentionally local and deterministic for now. A real embedding provider and external vector database can be added after the baseline behavior is testable.
+## The Workflow
 
-## Version 2.3 BM25 Retrieval
+**Issue -> Analyze -> Retrieve -> Plan -> Code -> Test -> Review -> Your approval -> Pull request**
 
-```text
-code chunks
-  -> tokenized sparse index
-  -> BM25 scoring
-  -> ranked chunks
-```
+1. **Connect your repository.** Sign in with GitHub and install the GitHub App on the repositories you choose.
+2. **Start with an issue.** Launch an AI run from the Command Center and follow its progress in Runs.
+3. **Inspect the work.** Review the plan, changed files, test results, and agent review. When tests fail, a bounded repair loop can attempt a correction.
+4. **Decide what ships.** Approve or reject the proposed change. Publish approved work as a GitHub pull request; merging remains your decision.
 
-BM25 gives the project a stronger lexical baseline than simple keyword scoring by accounting for term rarity, term frequency, and chunk length.
+## One Workspace, From Launch to Review
 
-## Version 2.4 Hybrid Retrieval
+| Workspace | Purpose |
+| --- | --- |
+| **Command Center** | Start an AI run or an explicitly labeled simulation; see introductory usage and simulation credits separately. |
+| **Runs** | Follow execution, inspect artifacts and failures, and review changes before publication. |
+| **Repositories** | Browse repositories available through your GitHub installation. |
+| **Billing** | Purchase sandbox simulation credits and inspect your balance, purchases, and activity. |
+| **Settings** | Inspect account and application configuration. |
 
-```text
-code chunks
-  -> keyword retrieval
-  -> vector retrieval
-  -> BM25 retrieval
-  -> normalized weighted merge
-  -> ranked hybrid chunks
-```
+### Try the Workflow on Your Terms
 
-Repo exploration now uses the hybrid retriever.
+Hosted accounts receive **two lifetime introductory AI runs per GitHub account**, subject to capacity and spending limits. These run the actual engineering workflow. Existing owned runs count toward the allowance; it does not reset after a deployment.
 
-## Version 2.5 Reciprocal Rank Fusion
+Want to explore the interaction without starting an AI job? **Simulation mode** produces a fixed example with saved results. A **$5 sandbox checkout grants five simulation credits**. Each new simulation uses one credit; reopening a saved result uses none.
 
-```text
-keyword ranked chunks
-BM25 ranked chunks
-vector ranked chunks
-  -> reciprocal rank fusion
-  -> ranked hybrid chunks
-```
+**Payments are test-only. No real money is collected. Simulation credits do not buy real AI runs**, modify repositories, execute tests, or create pull requests. Billing displays financial activity; execution belongs in the Command Center.
 
-RRF combines retrievers by rank instead of raw score, which is more stable because keyword, BM25, and vector scores have different meanings.
+> RepoPilot is an early-access engineering application. The workflow has been exercised on controlled repositories, not certified for arbitrary projects or unrestricted multi-tenant execution. This README describes the current source; the hosted deployment may lag unreleased changes.
 
-## Version 2.6 Reranker Interface
+## Built Around Trust Boundaries
+
+- **Human approval:** generated code does not become a published PR without approval.
+- **Account ownership:** hosted runs, purchases, balances, and simulation results belong to the signed-in GitHub account.
+- **Isolated execution:** repository tests run in restricted Docker containers, with a separate execution host required for production.
+- **Restricted containers:** non-root execution, disabled networking, a read-only root filesystem, and resource, output, and time limits constrain test execution. Workspace archives exclude sensitive files and Git configuration.
+- **Cost-aware AI:** per-run and shared-ledger spending guards reserve estimated costs before provider requests; account limits also restrict admission.
+- **Verified payment events:** signed webhooks, order validation, and replay-safe ledger entries determine credits, not checkout redirects or browser state.
+
+These are engineering guardrails, not a security audit or a guarantee that all untrusted code is safe. Dependency-heavy repositories need an appropriately prepared sandbox image; test containers cannot download dependencies from the network.
+
+## Under the Hood
 
 ```text
-hybrid RRF chunks
-  -> reranker
-  -> final ranked chunks
+Browser / Next.js frontend (Vercel)
+                 |
+            HTTPS API
+                 |
+       FastAPI + GitHub authentication
+          |                    |
+   PostgreSQL             Polar sandbox
+   jobs / artifacts       signed webhooks
+   usage / ledger
+          |
+   Dedicated workflow worker
+          |
+   LangGraph + repository retrieval + model provider
+          |
+   SSH -> isolated Docker runner (Azure, on demand)
+          |
+   Diff + tests + review -> human approval -> GitHub PR
 ```
 
-The reranker layer is model-provider agnostic. This version includes a no-op reranker and a deterministic heuristic reranker that boosts exact path, symbol, and early-content matches while slightly downranking test files unless the query asks for tests.
+| Layer | Technology |
+| --- | --- |
+| Web application | Next.js, React, TypeScript, Tailwind CSS, Radix UI, Lucide |
+| API and workflows | Python 3.11+, FastAPI, LangGraph, Pydantic |
+| Persistence | SQLAlchemy, Alembic, PostgreSQL; SQLite for local tests |
+| Repository context | Keyword search, BM25, deterministic local vector embeddings, rank fusion, and a reranker interface |
+| Model providers | OpenAI Responses API with structured outputs; deterministic mock provider for development |
+| Execution | Docker sandbox, dedicated worker, durable claims and heartbeats |
+| Hosted infrastructure | Vercel frontend, Azure app and runner VMs, Caddy HTTPS proxy |
+| Payments and monitoring | Polar sandbox; scheduled production checks and Healthchecks heartbeats |
 
-## Version 3 Code Writer
+The app host keeps trusted services online while the isolated Azure runner can start on demand and deallocate when idle. Simulation requests never enter that execution queue or wake the runner.
 
-```text
-GitHub issue
-  -> analysis
-  -> retrieval
-  -> implementation plan
-  -> code writer
-  -> structured change proposal
-  -> unified diff
-```
+## Run Locally
 
-The code writer is intentionally controlled. It proposes patch placeholders for retrieved target files and renders a diff. Structured changes can be applied only when explicitly enabled with a local workspace path.
+Use **Python 3.11+**, **Node.js 20+**, and Git. Docker is needed for sandboxed test execution. The default model provider is `mock`, so the basic local workflow needs no paid AI key. GitHub-backed operations require appropriate repository access.
 
-```text
-code writer
-  -> optional apply_code_changes
-  -> modified files
-  -> actual diff
-```
+### Backend
 
-## Version 4.1 Sandbox Test Runner
-
-```text
-code writer
-  -> optional apply_code_changes
-  -> optional run_tests
-  -> test result
-```
-
-The sandbox runner executes an explicit command inside Docker with no network access, CPU and memory limits, a timeout, and capped output. It is opt-in and requires a local workspace path.
-
-## Version 4.2 Test Result Analysis
-
-```text
-run_tests
-  -> analyze_tests
-  -> test analysis
-```
-
-Raw sandbox output is converted into a compact workflow decision: passed, failed, timed out, or command error. This gives later review and retry steps a stable signal instead of requiring them to parse stdout and stderr directly.
-
-## Version 4.3 Repair Decision
-
-```text
-analyze_tests
-  -> decide_repair
-  -> repair decision
-```
-
-The repair decider turns test analysis into the next workflow action: ready for review, attempt a repair, rerun tests, or stop for human inspection.
-
-## Version 4.4 Bounded Repair Loop
-
-```text
-decide_repair
-  -> optional prepare_repair
-  -> code_writer
-  -> apply_code_changes
-  -> run_tests
-```
-
-The workflow can now perform a bounded automated repair retry when tests fail with useful failure output. Repair attempts are counted in graph state and limited by `max_repair_attempts`, which defaults to one.
-
-## Version 4.5 Repair Context Injection
-
-```text
-prepare_repair
-  -> repair context
-  -> code_writer
-```
-
-Repair retries now receive structured context from the failed test run, including the attempt number, test status, summary, failure reason, and previous diff. The controlled code writer includes that context in the repair patch proposal so retries are guided by the failure instead of being blind repeats.
-
-## Version 4.6 Final Run Summary
-
-```text
-workflow result
-  -> summarize_run
-  -> run summary
-```
-
-Every workflow path now ends with a compact final verdict such as `planned_only`, `changes_proposed`, `ready_for_review`, `repair_failed`, or `needs_human`. This gives CLI users and future API/UI layers one stable object to inspect before digging into intermediate state.
-
-## Pre-Phase 5 Real Code Generation
-
-```text
-retrieved files
-  -> full target-file loading
-  -> structured code generation
-  -> validation
-  -> deterministic application
-```
-
-RepoPilot now separates retrieval previews from editable source. Retrieval selects likely target files, then the workflow loads complete file contents from the explicit workspace or GitHub before calling the code writer. The writer uses the LLM abstraction to return structured `FileChange` objects, while RepoPilot validates paths, actions, and content before applying changes and rendering diffs.
-
-The CLI uses a hard-coded issue:
-
-```text
-Login endpoint returns 500 when email is missing.
-```
-
-It prints:
-
-- structured issue analysis
-- structured implementation plan
-
-## Project Structure
-
-```text
-backend/
-  app/
-    agents/
-      analyzer.py
-      coder.py
-      planner.py
-      repair_decider.py
-      repo_explorer.py
-      run_summarizer.py
-      test_analyzer.py
-    core/
-      config.py
-      llm.py
-    graph/
-      state.py
-      workflow.py
-    retrieval/
-      bm25.py
-      chunker.py
-      embeddings.py
-      fusion.py
-      hybrid.py
-      keyword.py
-      reranker.py
-      vector.py
-    schemas/
-      code_change.py
-      execution.py
-      issue.py
-      plan.py
-      repository.py
-    tools/
-      filesystem.py
-      git.py
-      github.py
-      patch.py
-      sandbox.py
-  tests/
-main.py
-```
-
-## Setup
-
-```bash
+```sh
+git clone https://github.com/Abhi150904/RepoPilot.git
+cd RepoPilot
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
 ```
 
-Create or edit `.env` in the project root if you want to override configuration. The default provider is `mock`, so no LLM API key is required.
+Activate the environment with `.venv\Scripts\Activate.ps1` in PowerShell, or `source .venv/bin/activate` on macOS/Linux. Then:
 
-Useful environment variables:
+```sh
+python -m pip install -e ".[dev]"
+repopilot-api-dev
+```
 
-```text
+The API runs at `http://127.0.0.1:8000`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
+
+### Frontend
+
+In a second terminal, from the repository root:
+
+```sh
+cd frontend
+npm ci
+npm run dev
+```
+
+Open `http://localhost:3000`. The frontend uses `http://localhost:8000` by default. Override `NEXT_PUBLIC_REPOPILOT_API_URL` only when using another API origin or a configured same-origin proxy. Hosted sign-in and sandbox billing require the additional configuration below.
+
+### CLI
+
+```sh
+repopilot run --issue-text "Login endpoint returns 500 when email is missing"
+repopilot run --repo owner/name --issue 123
+repopilot run --repo owner/name --issue 123 --apply --test
+repopilot run --help
+```
+
+The CLI also supports approval/publication controls and JSON output. Private evaluations are available through `repopilot eval retrieval` and `repopilot eval workflow`; they are not exposed as public web pages or evaluation API endpoints.
+
+## Configuration and Operations
+
+<details>
+<summary><strong>Model configuration and spending limits</strong></summary>
+
+Set private configuration in the root `.env` or your deployment's secret environment. Never commit tokens or environment files. To opt into real OpenAI calls:
+
+```dotenv
 REPO_PILOT_LLM_PROVIDER=openai
 REPO_PILOT_LLM_MODEL=gpt-5.4-mini
-OPENAI_API_KEY=...
+OPENAI_API_KEY=<your private API key>
 REPO_PILOT_LLM_MAX_OUTPUT_TOKENS=8192
 REPO_PILOT_LLM_MAX_PROMPT_CHARS=60000
 REPO_PILOT_LLM_MAX_RETRIES=2
 REPOPILOT_LLM_BUDGET_USD=5
 REPOPILOT_LLM_RUN_BUDGET_USD=0.50
 REPOPILOT_LLM_BUDGET_PATH=.repopilot/openai-budget.sqlite
-GITHUB_TOKEN=...
 REPO_PILOT_DEFAULT_TEST_COMMAND=python -m pytest
 ```
 
-Set `GITHUB_TOKEN` when you want higher rate limits, need access to private repositories, or want RepoPilot to push branches and open pull requests.
+Only `mock` and `openai` are supported. Per-role model overrides are available; the spending guard rejects models without a verified entry in `backend/app/core/pricing.py`.
 
-Only `openai` and `mock` model providers are supported. OpenAI uses the Responses API
-with strict JSON schemas. The default model is `gpt-5.4-mini`; per-role model
-overrides remain available, but the spending guard rejects models without a
-verified entry in `backend/app/core/pricing.py`.
+Before each provider attempt, the ledger reserves estimated input cost plus maximum output cost, then replaces the reservation with reported usage. Reasoning tokens count toward output usage. Timeouts and missing usage retain their reservations; unknown cost is never silently treated as zero. Oversized prompts stop before a paid request rather than silently truncating whole-file replacement context.
 
-The local spending ledger reserves a conservative input estimate plus the maximum
-output cost before every API attempt, then replaces that reservation with reported
-usage cost. Output usage includes reasoning tokens. Requests that time out or lack
-usage retain their reservation. Failed attempts are included in usage records;
-unknown usage remains unknown rather than becoming zero. Rate-limit and transient
-server errors retry with bounded waits; quota errors, refusals, and incomplete
-responses stop safely.
+The default $5 shared-ledger and $0.50 per-run budgets are **RepoPilot guards, not provider billing caps**. They cannot see other applications or machines, and deleting the ledger resets its history. Use one persistent absolute ledger path across workers, outside source repositories. Unknown network outcomes may conservatively consume the local budget even when no charge occurred.
 
-The default limits are $5 total per API key and $0.50 per run, across local processes
-sharing the same ledger file. This is a conservative RepoPilot guard, not an OpenAI
-billing limit: it cannot see usage from another app or another machine, and deleting
-the ledger resets its history. Keep the ledger outside source repositories and use
-the same absolute path across workers. Unknown network outcomes can consume the
-local allowance even if no charge occurred. No live API calls are needed for tests.
+</details>
 
-Source files are never silently truncated before whole-file replacement. Oversized
-prompts stop before making a paid request; narrow the selected files or deliberately
-increase the prompt limit.
+<details>
+<summary><strong>GitHub access, hosted usage, and account limits</strong></summary>
 
-## CLI Usage
+Local CLI use can supply `GITHUB_TOKEN` for private repositories and publishing permissions. Hosted mode instead requires GitHub OAuth and GitHub App credentials, a durable database, an HTTPS frontend/callback, explicit CORS origins, and a separate worker. Do not configure a personal GitHub token in hosted mode.
 
-For restricted Phase 20 staging deployment, see [deploy/STAGING.md](deploy/STAGING.md).
+Hosted real runs have two lifetime introductory attempts per immutable GitHub user ID. Accepted jobs atomically reserve an attempt; the worker consumes it just before workflow invocation, after workflow construction and credential setup. Setup failures and stale claims recovered before invocation release it. Failures or interruptions after invocation still count. A crash immediately after the persisted execution marker can count even before the first provider request reaches the provider. Runner readiness failures leave the queued job's attempt reserved, not consumed.
 
-For the Vercel frontend and separate AWS execution-host deployment, see
-[deploy/AWS.md](deploy/AWS.md). Cloud resources are not provisioned by these files.
+Repairs within a run, reviewing, rejecting, publishing, refreshing, and replaying the same accepted idempotent request do not take an extra attempt. Default additional limits are one queued/running job per user and five admissions in a rolling 24-hour window, configured with `REPOPILOT_USER_MAX_ACTIVE_RUNS` and `REPOPILOT_USER_MAX_DAILY_RUNS`. These hosted admission limits do not apply to the local CLI; model spending guards still do.
 
-For Azure on-demand runner startup/idle deallocation and a credit-budget worksheet,
-see [deploy/AZURE.md](deploy/AZURE.md). Automation is opt-in and requires a
-VM-scoped app-host managed identity, a prepared runner, and live isolation checks.
-It includes the Docker Compose topology, GitHub tester allowlist, shared workspace
-requirements, rollback guidance, and live acceptance checks. It is not a public
-multi-tenant deployment or a completed cloud provisioning step.
+Simulation credits cannot replenish or bypass the real AI allowance. `GET /usage` reports the signed-in account's introductory usage and simulation balance; `GET /simulations` and `POST /simulations` provide owned saved simulations. The retired `POST /billing/simulate` route is not available.
 
-### Hosted demo scope
+</details>
 
-The public web app includes Command Center, Runs, Repositories, and Settings.
-Evaluations are CLI-only; `/evaluations/*` API endpoints and the frontend page
-are not exposed. Existing evaluation records are preserved in storage, and
-private evaluation workers can finish jobs already queued there.
+<details>
+<summary><strong>Polar sandbox setup, credits, and refunds</strong></summary>
 
-Hosted run creation is limited per authenticated GitHub user, across all
-repositories: `REPOPILOT_USER_MAX_ACTIVE_RUNS=1` queued/running job and
-`REPOPILOT_USER_MAX_DAILY_RUNS=5` new runs in a rolling 24-hour window.
-All admitted runs count toward the window, including failures. Replays with the
-same Idempotency-Key and payload return the original run without consuming
-another slot. Limits are checked transactionally in PostgreSQL or SQLite;
-they do not apply to local CLI runs. The existing global and per-run LLM budget
-caps remain in effect. These controls are not payment credits.
+Billing is disabled by default. The integration accepts **sandbox mode only**, with fixed sandbox API and checkout hosts. No live merchant onboarding is needed.
 
-Run benchmarks privately with `repopilot eval retrieval` or
-`repopilot eval workflow`; append `--json` for machine-readable results.
+1. Create an organization at [Polar sandbox](https://sandbox.polar.sh).
+2. Create a public one-time fixed-price product, `RepoPilot Demo Pack`, at USD 5.00. Do not add subscriptions, trials, discounts, or variable pricing.
+3. Record the product and organization IDs. Create an organization token with `checkouts:write` only.
+4. Add an HTTPS webhook at your API origin's `/billing/webhook` path. The hosted endpoint is `https://repopilot.duckdns.org/billing/webhook`. Select **Raw / JSON**, API version **2026-04**, and events **`order.paid`** and **`order.refunded`**. This matches the backend's explicit checkout API version.
+5. Put the credentials directly into the app host's private environment:
 
-The product CLI is:
-
-```bash
-python main.py run
+```dotenv
+REPOPILOT_BILLING_ENABLED=true
+REPOPILOT_POLAR_SERVER=sandbox
+REPOPILOT_POLAR_ACCESS_TOKEN=<sandbox organization token>
+REPOPILOT_POLAR_WEBHOOK_SECRET=<endpoint signing secret>
+REPOPILOT_POLAR_PRODUCT_ID=<product ID>
+REPOPILOT_POLAR_ORGANIZATION_ID=<organization ID>
+REPOPILOT_PUBLIC_BASE_URL=https://repo-pilot-sigma.vercel.app
 ```
 
-After installing the package, the same command is available as:
+Keep the signing secret exactly as provided; do not encode it yourself. Both current Standard Webhooks secrets and legacy Polar HMAC secrets require valid signatures and recent timestamps. Never put these secrets in browser code or `NEXT_PUBLIC_` variables. Billing also requires the database and complete checkout configuration.
 
-```bash
-repopilot run
+Only a verified `order.paid` event matching the expected checkout, customer, organization, product, currency, and amount grants five credits. A success redirect, unrelated event, canceled checkout, or provider error grants nothing. Order/action identifiers prevent duplicate grants and duplicate simulation spending.
+
+Any positive refund, including a partial refund, revokes the full five-credit pack once. Previously spent credits can leave a negative balance, which blocks further spending. A refund received before payment confirmation prevents a late grant. Existing purchases and ledger balances survive migration.
+
+The UI shows up to twenty recent purchases and ledger entries. Checkout return polls for up to a minute; use Refresh if confirmation is delayed. Failed checkout creation is recorded as failed; abandoned intents remain pending and are never treated as paid. Up to five pending checkout creations per account per UTC day are allowed. Automatic expiry reconciliation is not implemented.
+
+For missing credits, inspect webhook delivery and redeliver after fixing configuration. Never edit balances based on a success-page screenshot. Checkout return URLs can contain customer session tokens; the app removes that parameter, but do not share the original URL or secrets in screenshots.
+
+</details>
+
+<details>
+<summary><strong>Hosted deployment and release verification</strong></summary>
+
+The deployed topology uses Vercel and Azure. Existing `.env.aws` and `compose.aws.yml` names are retained for compatibility; those filenames do not imply that the current host is AWS.
+
+Infrastructure preparation, network isolation, rollback, and identity requirements remain in [Azure runner operations](deploy/AZURE.md), the [execution-host deployment guide](deploy/AWS.md), and [restricted staging](deploy/STAGING.md). Read these before provisioning; Compose files alone do not provision or secure cloud resources.
+
+For an existing installation, review and merge the complete change with passing checks. On the **app VM**, schedule a maintenance window with no queued/running real workflows and take a database backup. Never delete database volumes.
+
+```sh
+cd ~/RepoPilot
+git switch main
+git pull --ff-only origin main
+sudo docker compose --env-file .env.aws -f deploy/compose.aws.yml build migrate api worker
 ```
 
-Use `--help` to see all flags and examples:
+Stop if the build fails. Then stop the API and worker together before migrating:
 
-```bash
-python main.py run --help
+```sh
+sudo docker compose --env-file .env.aws -f deploy/compose.aws.yml stop api worker
+sudo docker compose --env-file .env.aws -f deploy/compose.aws.yml run --rm migrate
 ```
 
-Plan from plain issue text:
+If migration fails, keep these services stopped until diagnosed. Do not restart mixed code versions. On success:
 
-```bash
-python main.py run --issue-text "Login endpoint returns 500 when email is missing"
+```sh
+sudo docker compose --env-file .env.aws -f deploy/compose.aws.yml up -d api worker
 ```
 
-Run against a GitHub issue:
+Allow container health checks to run, then verify:
 
-```bash
-python main.py run --repo owner/name --issue 123
+```sh
+sudo python3 deploy/monitor_production.py --check-only
 ```
 
-Apply changes in a workspace:
+All checks must pass. Confirm Vercel Production is Ready for the matching merged commit. Migration `20261023_0008` adds allowance state and saved simulations; it backfills existing owned runs instead of granting a fresh allowance, while retaining purchases, balances, artifacts, and approvals. This application update needs no runner rebuild, new ports, or replacement Polar product.
 
-```bash
-python main.py run --repo owner/name --issue 123 --apply
+Verify the release end to end:
+
+- Billing has no execution button; Command Center separates AI usage from simulation credits.
+- Existing balances remain unchanged, and historical owned runs count toward introductory usage.
+- Starting one simulation spends exactly one credit and saves the result. Reloading or reopening spends nothing and creates no real job, PR, or runner startup.
+- A completed sandbox purchase grants five credits only after the signed event. Event redelivery adds nothing; cancellation adds nothing.
+- A refund revokes the pack once, including on redelivery. Negative balances after prior spending block further simulations.
+- A second GitHub account cannot access the first account's runs, purchases, balance, or simulation results.
+- Checkout session tokens are removed from the returned address, and production checks and the scheduled monitor remain healthy.
+
+Local database tests use SQLite. Also verify webhook redelivery, account isolation, and concurrent spending against a disposable PostgreSQL database before opening the integration to untrusted traffic. Passing local tests or merging code alone does not verify a hosted release.
+
+The production monitor covers the API, database, worker, proxy, queue/leases, disk space, website, and public API. The systemd timer runs every five minutes and can send Healthchecks heartbeats. Keep that heartbeat URL private.
+
+</details>
+
+## Development Checks
+
+From the repository root, with the Python environment active:
+
+```sh
+python -m pytest backend/tests -q
 ```
 
-Apply changes and run tests. If `--test-command` is omitted, RepoPilot uses `REPO_PILOT_DEFAULT_TEST_COMMAND`, which defaults to `python -m pytest`.
+From `frontend`:
 
-```bash
-python main.py run --repo owner/name --issue 123 --apply --test
+```sh
+npm test
+npm run typecheck
+npm run build
 ```
 
-Run a custom test command:
+The automated suites exercise workflows, retrieval, authentication and ownership, budgets, durable execution, introductory allowances, billing, migrations, and frontend behavior. Payment tests use fake provider responses; they do not replace verification of actual sandbox webhook delivery. Routine tests need no paid model requests.
 
-```bash
-python main.py run --repo owner/name --issue 123 --apply --test --test-command pytest -q
+## Explore the Code
+
+```text
+backend/app/          API, authentication, agents, workflow graph, retrieval, services
+backend/migrations/  Versioned database migrations
+backend/tests/       Backend, persistence, security, and workflow tests
+frontend/            Web application, shared components, API client, and UI tests
+deploy/              Containers, cloud operations, production monitoring
 ```
 
-Approve a reviewed run and validate publication without Git or GitHub side effects:
+---
 
-```bash
-python main.py run --repo owner/name --issue 123 --apply --test --approve --dry-run
-```
+**Less time moving tickets. More time reviewing work that moves them forward.**
 
-Publish a pull request after approval:
-
-```bash
-python main.py run --repo owner/name --issue 123 --apply --test --approve --publish pr
-```
-
-Print the full workflow result as JSON:
-
-```bash
-python main.py run --repo owner/name --issue 123 --json
-```
-
-Print detailed human-readable sections instead of the compact summary:
-
-```bash
-python main.py run --repo owner/name --issue 123 --verbose
-```
-
-## Test
-
-```bash
-pytest
-```
-
-## Technical Decisions
-
-- **LangGraph** is used from the start so stateful orchestration is part of the core design, not something bolted on later.
-- **Pydantic schemas** keep agent outputs explicit and easy to validate.
-- **Typed graph state** makes the data passed between nodes visible and beginner-friendly.
-- **LLM provider abstraction** keeps the workflow from being tied to a single model provider.
-- **Mock provider by default** makes Version 0 runnable without accounts, API keys, network calls, or hidden infrastructure.
-- **GitHub tools are deterministic functions** rather than extra agents, keeping reasoning separate from API access.
-- **Basic repository exploration comes before RAG**, so the project can prove the simple path before adding embeddings or vector infrastructure.
-- **Keyword retrieval is the Version 2.1 baseline** so later vector, BM25, hybrid, fusion, and reranking work can be compared against a deterministic starting point.
-- **Vector retrieval starts in memory** so the architecture is visible before adding Qdrant or provider-specific embedding APIs.
-- **BM25 adds a stronger sparse baseline** before combining retrievers in the hybrid retrieval phase.
-- **Hybrid retrieval uses reciprocal rank fusion** so chunks found by multiple retrievers rise without comparing incompatible raw scores.
-- **Reranking is explicit and replaceable** so a model-backed reranker can be added later without changing graph orchestration.
-- **Code writing is controlled in Version 3** so the system can expose structured proposed changes and diffs before executing tests or mutating real repositories.
-- **Applying changes is opt-in** and requires an explicit workspace path, so normal GitHub issue runs do not write files.
-- **Sandbox testing is opt-in** and runs explicit command tokens in a restricted Docker container instead of passing user input through a shell.
-- **Repair attempts are bounded** so automated retry behavior is explicit and cannot loop forever.
-- **Repair context is structured** so future model-backed repair can use failure details without scraping raw test output.
-- **Run summaries are final workflow outputs** so users can read one verdict before inspecting detailed agent state.
-- **Full-file source is separate from retrieval context** so generated edits are based on complete editable files, not truncated previews.
-- **Structured code changes are validated before application** so unsafe paths, empty content, and unrelated files fail cleanly.
-
-## Not Implemented Yet
-
-This version intentionally does not include Qdrant, model-backed reranking, automatic dependency installation inside sandbox images, FastAPI, a frontend, databases, pull request creation, or human approval.
+[Launch RepoPilot](https://repo-pilot-sigma.vercel.app) | [Browse the Source](https://github.com/Abhi150904/RepoPilot)

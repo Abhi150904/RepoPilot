@@ -1,9 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createRun, getHealth, listRuns, RepoPilotApiError } from "@/lib/api";
+import { createRun, createSimulation, getHealth, getRunUsage, listRuns, listSimulations, RepoPilotApiError } from "@/lib/api";
 
 describe("RepoPilot API client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("sends retry keys for real runs and keeps simulations out of billing routes", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await createRun({ issue: "Example" }, "retry-key");
+    expect(fetchMock.mock.calls[0][1].headers["Idempotency-Key"]).toBe("retry-key");
+    await createSimulation("simulation-key");
+    expect(fetchMock.mock.calls[1][0]).toBe("http://localhost:8000/simulations");
+    expect(fetchMock.mock.calls[1][1].body).toBe(JSON.stringify({ request_key: "simulation-key" }));
+    await getRunUsage();
+    await listSimulations();
+    expect(fetchMock.mock.calls[2][0]).toBe("http://localhost:8000/usage");
+    expect(fetchMock.mock.calls[3][0]).toBe("http://localhost:8000/simulations");
   });
 
   it("creates runs with JSON payloads", async () => {
