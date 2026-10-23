@@ -32,12 +32,22 @@ class RunLimitExceeded(Exception):
     pass
 
 
+class FreeRunsExhausted(RunLimitExceeded):
+    pass
+
+
+FREE_REAL_RUNS = 2
+
+
 @dataclass(frozen=True)
 class RunLimits:
     max_active: int
     max_daily: int
+    max_lifetime: int | None = None
 
-    def check(self, *, active: int, recent: int) -> None:
+    def check(self, *, active: int, recent: int, lifetime: int = 0) -> None:
+        if self.max_lifetime is not None and lifetime >= self.max_lifetime:
+            raise FreeRunsExhausted("Your two introductory AI runs are used or reserved. Sandbox credits can only fund simulations.")
         if active >= self.max_active:
             raise RunLimitExceeded(f"You already have {self.max_active} queued or running run(s). Wait for a run to finish before starting another.")
         if recent >= self.max_daily:
@@ -73,6 +83,7 @@ class RunRow(Base):
     worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    intro_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class RunEventRow(Base):
@@ -134,6 +145,8 @@ class RunRecord:
     idempotency_owner_key: str | None = None
     payload_hash: str | None = None
     owner: RunOwner | None = None
+    intro_state: str | None = None
+    worker_id: str | None = None
 
     def to_response(self) -> RunStatusResponse:
         return RunStatusResponse(
@@ -224,7 +237,8 @@ class RunStore:
                     user_runs = select(func.count()).select_from(RunRow).where(RunRow.owner_github_user_id == owner.github_user_id)
                     active = session.scalar(user_runs.where(RunRow.lifecycle_status.in_(["queued", "running"]))) or 0
                     recent = session.scalar(user_runs.where(RunRow.created_at >= now - timedelta(hours=24))) or 0
-                    limits.check(active=active, recent=recent)
+                    lifetime = session.scalar(user_runs.where(RunRow.intro_state.in_(["reserved", "consumed"]))) or 0
+                    limits.check(active=active, recent=recent, lifetime=lifetime)
                 record = RunRecord(
                     run_id=uuid4().hex,
                     lifecycle_status="queued",
@@ -237,6 +251,7 @@ class RunStore:
                     idempotency_key=idempotency_key,
                     idempotency_owner_key=owner_key if idempotency_key else None,
                     payload_hash=payload_hash if idempotency_key else None,
+                    intro_state="reserved" if limits and limits.max_lifetime is not None else None,
                 )
                 _upsert_owner_metadata(session, owner, now)
                 session.add(_row_from_record(record))
@@ -271,6 +286,7 @@ class RunStore:
             idempotency_key=idempotency_key,
             idempotency_owner_key=owner_key if idempotency_key else None,
             payload_hash=payload_hash if idempotency_key else None,
+            intro_state="reserved" if limits and limits.max_lifetime is not None else None,
         )
         with self._lock:
             if idempotency_key:
@@ -284,6 +300,7 @@ class RunStore:
                 limits.check(
                     active=sum(record.lifecycle_status in {"queued", "running"} for record in user_runs),
                     recent=sum(record.created_at >= now - timedelta(hours=24) for record in user_runs),
+                    lifetime=sum(record.intro_state in {"reserved", "consumed"} for record in user_runs),
                 )
             record.events.append(_event(record.run_id, "run.created", now, {"request_id": request_id}))
             record.events.append(_event(record.run_id, "run.queued", now, {}))
@@ -314,6 +331,46 @@ class RunStore:
             if record is None:
                 return None
             return record.to_response()
+
+    def introductory_usage(self, user_id: int) -> dict[str, int]:
+        if self._session_factory:
+            with self._session_factory() as session:
+                rows = session.execute(select(RunRow.intro_state, func.count())
+                    .where(RunRow.owner_github_user_id == user_id)
+                    .group_by(RunRow.intro_state)).all()
+                counts = dict(rows)
+        else:
+            with self._lock:
+                records = [row for row in self._runs.values() if row.owner and row.owner.github_user_id == user_id]
+                counts = {state: sum(row.intro_state == state for row in records) for state in ("reserved", "consumed")}
+        used, reserved = counts.get("consumed", 0), counts.get("reserved", 0)
+        return {"total": FREE_REAL_RUNS, "used": used, "reserved": reserved,
+                "remaining": max(0, FREE_REAL_RUNS - used - reserved)}
+
+    def begin_execution(self, run_id: str, *, worker_id: str) -> bool:
+        """Consume the reservation only after worker setup succeeds, before invoking AI."""
+        now = _now()
+        if self._session_factory:
+            with self._session_factory.begin() as session:
+                row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+                if row is None or row.lifecycle_status != "running" or row.worker_id != worker_id:
+                    return False
+                if session.scalar(select(RunEventRow.id).where(RunEventRow.run_id == run_id,
+                        RunEventRow.event_type == "run.execution_started").limit(1)) is not None:
+                    return False
+                if row.intro_state == "reserved":
+                    row.intro_state = "consumed"
+                _add_event(session, run_id, "run.execution_started", now, {})
+            return True
+        with self._lock:
+            row = self._runs.get(run_id)
+            if row is None or row.lifecycle_status != "running" or row.worker_id != worker_id or any(
+                    event["event_type"] == "run.execution_started" for event in row.events):
+                return False
+            if row.intro_state == "reserved":
+                row.intro_state = "consumed"
+            row.events.append(_event(run_id, "run.execution_started", now, {}))
+            return True
 
     def get_request_id(self, run_id: str) -> str | None:
         record = self._record(run_id)
@@ -441,11 +498,13 @@ class RunStore:
                             RunRow.lifecycle_status == "running",
                             RunRow.lease_expires_at.is_not(None),
                             RunRow.lease_expires_at < cutoff,
-                        )
+                        ).with_for_update(skip_locked=True)
                     )
                 )
                 for row in rows:
                     row.lifecycle_status = "interrupted"
+                    if row.intro_state == "reserved":
+                        row.intro_state = "released"
                     row.updated_at = now
                     row.worker_id = None
                     row.lease_expires_at = None
@@ -461,6 +520,9 @@ class RunStore:
             rows = [record for record in self._runs.values() if record.lifecycle_status == "running"]
             for record in rows:
                 record.lifecycle_status = "interrupted"
+                record.worker_id = None
+                if record.intro_state == "reserved":
+                    record.intro_state = "released"
                 record.updated_at = now
                 record.error = RunError(
                     code="run_interrupted",
@@ -509,6 +571,7 @@ class RunStore:
                 return None
             record = queued[0]
             record.lifecycle_status = "running"
+            record.worker_id = worker_id or uuid4().hex
             record.updated_at = now
             record.events.append(_event(record.run_id, "run.claimed", now, {"worker_id": worker_id}))
             record.events.append(_event(record.run_id, "run.started", now, {}))
@@ -594,7 +657,7 @@ class RunStore:
         now = _now()
         if self._session_factory:
             with self._session_factory() as session:
-                row = session.get(RunRow, run_id)
+                row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
                 if row is None:
                     raise KeyError(run_id)
                 row.lifecycle_status = lifecycle_status
@@ -605,6 +668,8 @@ class RunStore:
                     row.last_heartbeat_at = now
                     row.lease_expires_at = now + timedelta(seconds=lease_seconds)
                 if lifecycle_status in ("completed", "failed", "interrupted"):
+                    if row.intro_state == "reserved":
+                        row.intro_state = "consumed" if lifecycle_status == "completed" else "released"
                     row.worker_id = None
                     row.lease_expires_at = None
                     row.last_heartbeat_at = None
@@ -621,6 +686,12 @@ class RunStore:
         with self._lock:
             record = self._runs[run_id]
             record.lifecycle_status = lifecycle_status
+            if lifecycle_status == "running":
+                record.worker_id = worker_id or record.worker_id
+            elif lifecycle_status in ("completed", "failed", "interrupted"):
+                record.worker_id = None
+            if record.intro_state == "reserved" and lifecycle_status in ("completed", "failed", "interrupted"):
+                record.intro_state = "consumed" if lifecycle_status == "completed" else "released"
             record.publication_status = publication_status or record.publication_status
             record.updated_at = now
             record.response = response or record.response
@@ -679,6 +750,7 @@ def _row_from_record(record: RunRecord) -> RunRow:
         idempotency_key=record.idempotency_key,
         idempotency_owner_key=record.idempotency_owner_key,
         payload_hash=record.payload_hash,
+        intro_state=record.intro_state,
         owner_github_user_id=record.owner.github_user_id if record.owner else None,
         owner_github_login=record.owner.github_login if record.owner else None,
         owner_installation_id=record.owner.installation_id if record.owner else None,
@@ -710,6 +782,7 @@ def _record_from_row(row: RunRow, events: list[dict[str, Any]]) -> RunRecord:
         idempotency_owner_key=row.idempotency_owner_key,
         payload_hash=row.payload_hash,
         owner=owner,
+        intro_state=row.intro_state,
     )
 
 

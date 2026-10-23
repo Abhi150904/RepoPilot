@@ -3,18 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { BillingContent } from "@/components/billing-content";
-import { getAuthMe, getBilling, RepoPilotApiError, simulateBillingRun, startSandboxCheckout, type BillingSimulation, type BillingStatus } from "@/lib/api";
+import { getAuthMe, getBilling, RepoPilotApiError, startSandboxCheckout, type BillingStatus } from "@/lib/api";
 
 export default function BillingPage() {
   const [data, setData] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [signedOut, setSignedOut] = useState(false);
-  const [busy, setBusy] = useState<"checkout" | "simulation" | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [simulation, setSimulation] = useState<BillingSimulation | null>(null);
   const actionLock = useRef(false);
-  const keys = useRef<{ checkout?: string; simulation?: string }>({});
+  const checkoutKey = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -31,6 +30,11 @@ export default function BillingPage() {
 
   useEffect(() => {
     const returned = new URLSearchParams(window.location.search).get("checkout");
+    const cleanUrl = new URL(window.location.href);
+    if (cleanUrl.searchParams.has("customer_session_token")) {
+      cleanUrl.searchParams.delete("customer_session_token");
+      window.history.replaceState(window.history.state, "", cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+    }
     if (returned === "returned") setNotice("Returned from checkout. Your balance updates after payment confirmation.");
     if (returned === "cancelled") setNotice("Checkout closed. Credits are added only after payment confirmation.");
     void refresh();
@@ -43,30 +47,24 @@ export default function BillingPage() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  async function act(kind: "checkout" | "simulation") {
+  async function checkout() {
     if (actionLock.current) return;
     actionLock.current = true;
-    setBusy(kind);
+    setBusy(true);
     setError(null);
-    const key = keys.current[kind] ?? crypto.randomUUID();
-    keys.current[kind] = key;
+    const key = checkoutKey.current ?? crypto.randomUUID();
+    checkoutKey.current = key;
     try {
-      if (kind === "checkout") {
-        const result = await startSandboxCheckout(key);
-        window.location.assign(result.url);
-      } else {
-        setSimulation(await simulateBillingRun(key));
-        delete keys.current[kind];
-        await refresh();
-      }
+      const result = await startSandboxCheckout(key);
+      window.location.assign(result.url);
     } catch (err) {
       // Retry ambiguous network failures with the same key to avoid double spending.
-      if (err instanceof RepoPilotApiError && err.status > 0 && err.status < 500) delete keys.current[kind];
-      if (err instanceof RepoPilotApiError && err.code === "checkout_failed") delete keys.current[kind];
+      if (err instanceof RepoPilotApiError && err.status > 0 && err.status < 500) checkoutKey.current = null;
+      if (err instanceof RepoPilotApiError && err.code === "checkout_failed") checkoutKey.current = null;
       setError(err instanceof Error ? err.message : "Billing request failed.");
-    } finally { actionLock.current = false; setBusy(null); }
+    } finally { actionLock.current = false; setBusy(false); }
   }
 
   return <AppShell><BillingContent data={data} loading={loading} signedOut={signedOut} busy={busy} error={error} notice={notice}
-    simulation={simulation} onRefresh={() => void refresh()} onCheckout={() => void act("checkout")} onSimulate={() => void act("simulation")} /></AppShell>;
+    onRefresh={() => void refresh()} onCheckout={() => void checkout()} /></AppShell>;
 }

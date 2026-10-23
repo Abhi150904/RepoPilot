@@ -139,11 +139,15 @@ def test_tampered_or_malformed_signature(billing):
 def test_simulation_is_idempotent_and_cannot_overdraw(billing):
     paid(billing)
     key = str(uuid4())
-    assert billing.simulate(123, key)["simulated"] is True
+    first = billing.simulate(123, key)
+    assert first["simulated"] is True
+    replay = SandboxBilling(billing.config).simulate(123, key)
+    assert replay["simulation_id"] == first["simulation_id"]
+    assert replay["created_at"] == first["created_at"]
     assert billing.simulate(123, key)["demo_balance"] == 4
     for _ in range(4):
         billing.simulate(123, str(uuid4()))
-    with pytest.raises(BillingError, match="No demo attempts"):
+    with pytest.raises(BillingError, match="No simulation credits"):
         billing.simulate(123, str(uuid4()))
     with pytest.raises(BillingError):
         billing.simulate(456, key)
@@ -183,19 +187,26 @@ def test_billing_auth_csrf_and_payload_limits(billing):
     app = create_app(settings=billing.config, session_store=sessions, billing_service=billing)
     with TestClient(app) as client:
         assert client.get("/billing").status_code == 401
-        assert client.post("/billing/simulate", json={"request_key": str(uuid4())}).status_code == 401
+        assert client.post("/simulations", json={"request_key": str(uuid4())}).status_code == 401
+        assert client.post("/billing/simulate", json={"request_key": str(uuid4())}).status_code == 404
         auth = sessions.create_session(user=GitHubUser(123, "test-user"), oauth_access_token="test-token")
         client.cookies.set("repopilot_session", auth.session_id)
         assert client.get("/billing").status_code == 200
-        assert client.post("/billing/simulate", json={"request_key": str(uuid4())}).status_code == 403
+        assert client.post("/simulations", json={"request_key": str(uuid4())}).status_code == 403
         assert client.post("/billing/webhook", content=b"x" * 262145).status_code == 413
         assert client.post("/billing/webhook", content=b"{}").status_code == 400
         paid(billing)
         # A billing simulation never creates a queued real run.
-        result = client.post("/billing/simulate", json={"request_key": str(uuid4())},
+        result = client.post("/simulations", json={"request_key": str(uuid4())},
                              headers={"X-CSRF-Token": auth.csrf_token})
         assert result.status_code == 200
         assert client.get("/runs").json() == []
+        assert client.get("/simulations").json()[0]["simulation_id"] == result.json()["simulation_id"]
+        assert client.get("/usage").json()["simulation_credits"] == 4
+        other = sessions.create_session(user=GitHubUser(456, "other-user"), oauth_access_token="other-token")
+        client.cookies.set("repopilot_session", other.session_id)
+        assert client.get("/simulations").json() == []
+        assert client.get("/usage").json()["introductory"]["remaining"] == 2
 
 
 def test_concurrent_spending_cannot_overdraw(billing):
@@ -214,6 +225,19 @@ def test_concurrent_spending_cannot_overdraw(billing):
     assert billing.status(123)["demo_balance"] == 0
 
 
+def test_failed_simulation_transaction_does_not_spend_a_credit(billing, monkeypatch):
+    paid(billing)
+
+    def fail(*args):
+        raise RuntimeError("Cannot persist simulation result")
+
+    monkeypatch.setattr(billing, "_simulation_response", fail)
+    with pytest.raises(RuntimeError):
+        billing.simulate(123, str(uuid4()))
+    assert billing.status(123)["demo_balance"] == 5
+    assert billing.simulations(456) == []
+
+
 def test_billing_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
     from alembic import command
     from alembic.config import Config
@@ -229,10 +253,52 @@ def test_billing_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
         from app.api.runs import RunRow
         RunRow.__table__.create(engine)
         command.stamp(config, "20261010_0006")
-        command.upgrade(config, "head")
+        command.upgrade(config, "20261019_0007")
         assert {"billing_accounts", "billing_checkouts", "billing_entries", "billing_events"} <= set(inspect(engine).get_table_names())
         command.downgrade(config, "20261010_0006")
         assert "billing_entries" not in inspect(engine).get_table_names()
         assert "runs" in inspect(engine).get_table_names()
     finally:
         engine.dispose()
+
+
+def test_purchased_credits_cannot_bypass_real_run_allowance(billing):
+    from app.api.runs import RunStore
+    from app.auth.models import AuthorizedRepository
+    from app.services.run_service import RepoPilotRunService
+
+    class GitHub:
+        def authorize_repository(self, **kwargs):
+            return AuthorizedRepository("owner/repo", 1)
+
+    settings = billing.config.model_copy(update={"inline_run_execution": False})
+    store = RunStore(database_url=settings.database_url)
+    service = RepoPilotRunService(run_store=store, heartbeat_interval_seconds=0)
+    sessions = InMemorySessionStore()
+    auth = sessions.create_session(user=GitHubUser(123, "test-user"), oauth_access_token="test-token")
+    paid(billing)
+    with TestClient(create_app(settings=settings, service=service, session_store=sessions,
+                              billing_service=billing, github_app_service=GitHub())) as client:
+        assert client.get("/usage").status_code == 401
+        client.cookies.set("repopilot_session", auth.session_id)
+        headers = {"X-CSRF-Token": auth.csrf_token}
+        payload = {"repository": "owner/repo", "issue_number": 1}
+        for _ in range(2):
+            response = client.post("/runs", json=payload, headers=headers)
+            assert response.status_code == 202
+            run_id = response.json()["run_id"]
+            store.mark_running(run_id, worker_id="test-worker")
+            assert store.begin_execution(run_id, worker_id="test-worker")
+            store.mark_failed(run_id, RuntimeError("Workflow failed after execution started"))
+        blocked = client.post("/runs", json={**payload, "intro_state": "released", "max_lifetime": 999,
+                                             "llm_provider": "mock"}, headers=headers)
+        assert blocked.status_code == 402
+        assert blocked.json()["error"]["code"] == "free_runs_exhausted"
+        usage = client.get("/usage").json()
+        assert usage["introductory"]["remaining"] == 0
+        assert usage["simulation_credits"] == 5
+        simulation = client.post("/simulations", json={"request_key": str(uuid4())}, headers=headers)
+        assert simulation.status_code == 200
+        assert client.get("/usage").json()["introductory"]["remaining"] == 0
+        assert client.get("/usage").json()["simulation_credits"] == 4
+    store.close()

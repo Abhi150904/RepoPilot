@@ -35,15 +35,16 @@ from app.api.schemas import (
 from app.core.config import Settings, deployment_issues, get_settings, inline_run_execution_enabled, readiness_report, staging_user_allowed
 from app.core.audit import AuditLogger
 from app.core.llm_usage import LLMUsageRecorder
-from app.api.runs import RunLimits, RunStore
+from app.api.runs import FREE_REAL_RUNS, RunLimits, RunStore
 from app.services.run_service import RepoPilotRunService, RunServiceError
-from app.services.billing import BillingError, SandboxBilling
+from app.services.billing import BillingError, SandboxBilling, billing_configured
 from pydantic import BaseModel
 from uuid import UUID
 
 
 class BillingAction(BaseModel):
     request_key: UUID
+    model_config = {"extra": "forbid"}
 
 
 def create_app(
@@ -306,8 +307,21 @@ def create_app(
     def billing_checkout(action: BillingAction, request: Request):
         return billing.checkout(billing_user(request, csrf=True), str(action.request_key))
 
-    @api.post("/billing/simulate")
-    def billing_simulate(action: BillingAction, request: Request):
+    @api.get("/usage")
+    def run_usage(request: Request):
+        session = _require_session(request, sessions, config)
+        user_id = session.user.github_user_id if session else None
+        return {"enforced": config.hosted_mode,
+                "introductory": run_service.run_store.introductory_usage(user_id) if user_id else None,
+                "simulation_credits": billing.balance(user_id) if user_id else 0,
+                "billing_enabled": billing_configured(config) if user_id else False}
+
+    @api.get("/simulations")
+    def list_simulations(request: Request):
+        return billing.simulations(billing_user(request))
+
+    @api.post("/simulations")
+    def start_simulation(action: BillingAction, request: Request):
         return billing.simulate(billing_user(request, csrf=True), str(action.request_key))
 
     @api.post("/billing/webhook")
@@ -345,6 +359,7 @@ def create_app(
             limits=RunLimits(
                 max_active=config.user_max_active_runs,
                 max_daily=config.user_max_daily_runs,
+                max_lifetime=FREE_REAL_RUNS,
             ) if config.hosted_mode else None,
         )
         if inline_run_execution_enabled(config) and run_service.consume_execution_pending(run.run_id):

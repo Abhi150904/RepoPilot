@@ -9,13 +9,13 @@ const data: BillingStatus = { enabled: true, environment: "sandbox", demo_balanc
 
 function render(overrides = {}) {
   vi.stubGlobal("React", React);
-  return renderToStaticMarkup(React.createElement(BillingContent, { data, loading: false, signedOut: false, busy: null,
-    error: null, notice: null, simulation: null, onRefresh: () => {}, onCheckout: () => {}, onSimulate: () => {}, ...overrides }));
+  return renderToStaticMarkup(React.createElement(BillingContent, { data, loading: false, signedOut: false, busy: false,
+    error: null, notice: null, onRefresh: () => {}, onCheckout: () => {}, ...overrides }));
 }
 
 describe("sandbox billing", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("labels money and output as test-only and disables spending an empty balance", () => {
+  it("labels money as test-only and provides no balance-spending action", () => {
     const html = render();
     expect(html).toContain("No real charges");
     expect(html).toContain('aria-describedby="checkout-disclosure"');
@@ -23,16 +23,19 @@ describe("sandbox billing", () => {
     expect(html).not.toContain("Billing Demo");
     expect(html).not.toContain("Sandbox only");
     expect(html).toContain("$5.00");
-    expect(html).toMatch(/disabled=""[^>]*>.*?Run simulation/);
+    expect(html).not.toContain("Run simulation");
+    expect(html).not.toContain("Start simulation");
+    expect(html).not.toContain("Simulated result");
+    expect(html).toContain('href="/app"');
   });
   it("does not expose checkout when unavailable or signed out", () => {
     expect(render({ data: { ...data, enabled: false } })).not.toContain("Buy credits");
     expect(render({ data: null, signedOut: true })).toContain("Sign in with GitHub");
   });
-  it("shows errors and the explicit simulated result", () => {
-    const html = render({ error: "Request failed", simulation: { simulated: true, summary: "Example patch", patch: "+ sample", checks: [], demo_balance: 0 } });
+  it("shows billing errors", () => {
+    const html = render({ error: "Request failed" });
     expect(html).toContain('role="alert"');
-    expect(html).toContain("No AI call, repository change, or test execution.");
+    expect(html).toContain("Request failed");
   });
   it("renders payment history with a stable timezone and singular credits", () => {
     const html = render({ data: { ...data, demo_balance: 1,
